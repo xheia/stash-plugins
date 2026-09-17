@@ -253,6 +253,269 @@ except engines.EngineError:
 
 
 # --------------------------------------------------------------------------- #
+# 9. 代理地址归一化
+# --------------------------------------------------------------------------- #
+section("9) 代理地址归一化")
+
+# ★ 实测撞到过：`http:192.168.3.96:7890` 少了两个斜杠，urllib 会把整个串当 authority，
+#   主机名变成 "http:192.168.3.96"，于是**每个**引擎都报 DNS 解析失败。
+check("少两个斜杠 -> 自动补回来",
+      engines.normalize_proxy("http:192.168.3.96:7890") == "http://192.168.3.96:7890",
+      engines.normalize_proxy("http:192.168.3.96:7890"))
+check("只写 host:port -> 补 http://",
+      engines.normalize_proxy("192.168.3.96:7890") == "http://192.168.3.96:7890")
+check("正常写法原样保留",
+      engines.normalize_proxy("http://192.168.3.96:7890") == "http://192.168.3.96:7890")
+check("结尾斜杠去掉",
+      engines.normalize_proxy("http://192.168.3.96:7890/") == "http://192.168.3.96:7890")
+check("https 代理保留协议",
+      engines.normalize_proxy("https://proxy.lan:8443") == "https://proxy.lan:8443")
+check("带账号密码保留",
+      engines.normalize_proxy("http://u:p@10.0.0.1:8080") == "http://u:p@10.0.0.1:8080")
+check("带引号的写法也认", engines.normalize_proxy('"http://a.lan:1"') == "http://a.lan:1")
+check("裸域名带端口不被误伤",
+      engines.normalize_proxy("proxy.lan:7890") == "http://proxy.lan:7890",
+      engines.normalize_proxy("proxy.lan:7890"))
+check("纯主机名带端口不被误伤",
+      engines.normalize_proxy("myproxy:8080") == "http://myproxy:8080")
+check("IPv6 字面量能处理",
+      engines.normalize_proxy("[::1]:8080") == "http://[::1]:8080")
+check("空白 -> 空", engines.normalize_proxy("   ") == "")
+check("None -> 空", engines.normalize_proxy(None) == "")
+
+# SOCKS 代理要给出可操作的报错，而不是抛 urllib 的 unknown url type
+try:
+    engines.http_request("http://example.invalid/", proxy="socks5://127.0.0.1:1080")
+    check("SOCKS 代理应报错", False, "竟然没抛错")
+except engines.EngineError as exc:
+    check("SOCKS 代理给出可操作提示", "不支持 SOCKS" in str(exc), str(exc))
+
+
+# --------------------------------------------------------------------------- #
+# 10. 内网地址识别（决定要不要绕开代理）
+# --------------------------------------------------------------------------- #
+section("10) 内网地址识别")
+
+for host in ("localhost", "127.0.0.1", "192.168.3.96", "10.0.0.5",
+             "172.16.0.1", "172.31.255.254", "169.254.1.1", "nas", "::1"):
+    check("算内网: %s" % host, engines.is_local_host(host))
+for host in ("translate.googleapis.com", "edge.microsoft.com", "8.8.8.8",
+             "172.15.0.1", "172.32.0.1", "100.63.0.1", ""):
+    check("不算内网: %s" % (host or "(空)",), not engines.is_local_host(host))
+check("CGNAT 段算内网", engines.is_local_host("100.64.0.1"))
+
+
+# --------------------------------------------------------------------------- #
+# 11. 腾讯云地域 / 接入地址归一化
+# --------------------------------------------------------------------------- #
+section("11) 腾讯云地域归一化")
+
+
+def tencent_endpoint(value):
+    e = engines.TencentEngine({"tencent_secret_id": "i", "tencent_secret_key": "k",
+                               "tencent_region": value})
+    return e.host, e.region
+
+
+check("裸地域 -> 补全接入点",
+      tencent_endpoint("ap-guangzhou") == ("tmt.ap-guangzhou.tencentcloudapi.com", "ap-guangzhou"))
+# ★ 实测撞到过：用户填接口地址，被原样塞进 X-TC-Region，服务端报 InvalidParameterValue
+check("完整接口地址 -> 地域回落默认",
+      tencent_endpoint("https://tmt.tencentcloudapi.com") == ("tmt.tencentcloudapi.com", "ap-guangzhou"))
+check("带地域的完整地址 -> 提取地域",
+      tencent_endpoint("https://tmt.ap-shanghai.tencentcloudapi.com")
+      == ("tmt.ap-shanghai.tencentcloudapi.com", "ap-shanghai"))
+check("裸域名 -> 提取地域",
+      tencent_endpoint("tmt.ap-beijing.tencentcloudapi.com")
+      == ("tmt.ap-beijing.tencentcloudapi.com", "ap-beijing"))
+check("留空 -> 默认",
+      tencent_endpoint("") == ("tmt.tencentcloudapi.com", "ap-guangzhou"))
+check("自定义内网接入点保留 host",
+      tencent_endpoint("https://tmt.internal.corp")[0] == "tmt.internal.corp")
+
+_tc_gz = engines.TencentEngine({"tencent_secret_id": "i", "tencent_secret_key": "k",
+                                "tencent_region": "ap-guangzhou"})
+_tc_sh = engines.TencentEngine({"tencent_secret_id": "i", "tencent_secret_key": "k",
+                                "tencent_region": "ap-shanghai"})
+check("签名里的 host 随接入点变化",
+      _tc_gz._sign("{}", 1700000000) != _tc_sh._sign("{}", 1700000000))
+
+
+# --------------------------------------------------------------------------- #
+# 12. 阿里云 TranslateGeneral 的必填参数
+# --------------------------------------------------------------------------- #
+section("12) 阿里云 TranslateGeneral 必填参数")
+
+
+class _CaptureAlibaba(engines.AlibabaEngine):
+    """记录实际发出的参数，验证必填项一个不少。"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.seen = []
+
+    def _invoke(self, action, params):
+        self.seen.append((action, dict(params)))
+        return {"Code": "200", "Data": {"Translated": "你好", "DetectedLanguage": "en"}}
+
+
+capture = _CaptureAlibaba({"alibaba_access_key": "a", "alibaba_access_secret": "b"})
+capture.translate_detailed("hello", "en", "zh-CN")
+_action, _params = capture.seen[-1]
+# ★ 实测撞到过：缺 FormatType，服务端报 "FormatType is mandatory for this action."
+check("TranslateGeneral 必须带 FormatType",
+      _params.get("FormatType") == "text", str(_params))
+check("TranslateGeneral 带 Scene", _params.get("Scene") == "general")
+check("目标语言已映射成引擎写法", _params.get("TargetLanguage") == "zh")
+check("显式源语言已映射成引擎写法", _params.get("SourceLanguage") == "en")
+check("原文带上", _params.get("SourceText") == "hello")
+
+
+# --------------------------------------------------------------------------- #
+# 13. 退化译文拦截
+# --------------------------------------------------------------------------- #
+section("13) 退化译文拦截")
+
+import detect as detect_mod  # noqa: E402
+
+# ★ 实测撞到过：LibreTranslate 把人名串翻成「相相相相相相相相…」，还被当成成功写进了库
+check("识别单字长串重复", detect_mod.looks_degenerate("相" * 12))
+check("识别拉丁字符长串重复", detect_mod.looks_degenerate("a" * 20))
+check("识别单字占比过半的文本", detect_mod.looks_degenerate("相相生相相相相相相生" * 3))
+check("识别两字符交替刷屏", detect_mod.looks_degenerate("相生" * 10))
+check("正常译文放行", not detect_mod.looks_degenerate("美丽的护士秋穗"))
+check("正常长句放行",
+      not detect_mod.looks_degenerate("这是一段正常的场景简介，包含足够多的不同字符用于通过判定。"))
+check("正常叠字放行（未达阈值）", not detect_mod.looks_degenerate("哈哈哈哈"))
+check("常见字多次出现但不刷屏，放行",
+      not detect_mod.looks_degenerate("他一个人一个人地走过去，一个人一个人地回来。"))
+check("带英文与编号的标题放行",
+      not detect_mod.looks_degenerate("Cospuri #461: Ria Kurumi"))
+check("中文夹英文的标题放行",
+      not detect_mod.looks_degenerate("4K 修复版 中文字幕，全长 120 分钟"))
+check("空串放行", not detect_mod.looks_degenerate(""))
+check("纯标点放行", not detect_mod.looks_degenerate("--------------"))
+
+
+def _make_stub(name, reply=None, error=None, counter=None):
+    """造一个可编排的桩引擎并注册进注册表。"""
+    class _Stub(engines.BaseEngine):
+        pass
+
+    _Stub.name = name
+
+    def translate_detailed(self, text, source="auto", target="zh-CN"):
+        if counter is not None:
+            counter.append(name)
+        if error is not None:
+            raise error if isinstance(error, engines.EngineError) else engines.EngineError(error)
+        return reply, "en"
+
+    _Stub.translate_detailed = translate_detailed
+    engines.ENGINE_CLASSES[name] = _Stub
+    return _Stub
+
+
+def _drop_stubs():
+    for name in [n for n in engines.ENGINE_CLASSES if n.startswith("_")]:
+        del engines.ENGINE_CLASSES[name]
+
+
+stub_calls = []
+_make_stub("_degen", reply="相" * 30, counter=stub_calls)
+_make_stub("_good", reply="正常译文", counter=stub_calls)
+_router = engines.Router(["_degen", "_good"], {})
+_result = _router.translate("hello")
+check("退化译文被丢弃并降级到下一个引擎",
+      _result.engine == "_good" and _result.text == "正常译文",
+      "%s / %s" % (_result.engine, _result.text))
+check("降级过程记录在 attempts 里",
+      any("退化" in a for a in _result.attempts), str(_result.attempts))
+
+_make_stub("_degen_only", reply="x" * 40)
+try:
+    engines.Router(["_degen_only"], {}).translate("hello")
+    check("全部退化时抛错", False, "竟然没抛错")
+except engines.EngineError as exc:
+    check("全部退化时抛错并说明原因", "退化" in str(exc), str(exc))
+
+
+# --------------------------------------------------------------------------- #
+# 14. 引擎熔断
+# --------------------------------------------------------------------------- #
+section("14) 引擎熔断")
+
+bench_calls = []
+_make_stub("_dead", error="接口挂了", counter=bench_calls)
+_make_stub("_alive", reply="好的", counter=bench_calls)
+_router = engines.Router(["_dead", "_alive"], {"engine_skip_after": 2})
+for _ in range(6):
+    _router.translate("hello")
+check("连续失败达阈值后不再尝试该引擎",
+      bench_calls.count("_dead") == 2, "实际调用 %d 次" % bench_calls.count("_dead"))
+check("熔断名单可查", _router.benched_names() == ["_dead"], str(_router.benched_names()))
+check("健康引擎不受影响", _router.translate("hi").engine == "_alive")
+
+off_calls = []
+_make_stub("_dead0", error="接口挂了", counter=off_calls)
+_make_stub("_alive0", reply="好的", counter=off_calls)
+_router = engines.Router(["_dead0", "_alive0"], {"engine_skip_after": 0})
+for _ in range(4):
+    _router.translate("hello")
+check("阈值 0 表示关闭熔断",
+      off_calls.count("_dead0") == 4, "实际调用 %d 次" % off_calls.count("_dead0"))
+
+_ok_calls = []
+_make_stub("_flaky", reply="好的", counter=_ok_calls)
+_router = engines.Router(["_flaky"], {"engine_skip_after": 1})
+for _ in range(3):
+    _router.translate("hello")
+check("成功会清零失败计数", not _router.benched_names(), str(_router.benched_names()))
+
+
+# --------------------------------------------------------------------------- #
+# 15. 失败报告要说清楚「谁没上」
+# --------------------------------------------------------------------------- #
+section("15) 失败报告")
+
+_make_stub("_dead_a", error="HTTP 404")
+try:
+    engines.Router(["_dead_a", "tencent"], {"engine_skip_after": 1}).translate("hello")
+    check("应抛错", False, "竟然没抛错")
+except engines.EngineError as exc:
+    message = str(exc)
+check("报告含失败引擎与原因", "_dead_a: HTTP 404" in message, message)
+check("报告含被熔断的引擎", "暂时跳过" in message, message)
+check("报告含缺凭证的引擎", "tencent" in message and "未配置" in message, message)
+
+_make_stub("_dead_b", error="网络错误: [Errno -2] Name or service not known")
+try:
+    engines.Router(["_dead_b"], {"http_proxy": "http:192.168.3.96:7890"}).translate("hi")
+    check("应抛错", False, "竟然没抛错")
+except engines.EngineError as exc:
+    hint = str(exc)
+check("域名解析失败时点出代理问题", "http_proxy" in hint, hint)
+check("顺带展示规范化后的代理地址", "http://192.168.3.96:7890" in hint, hint)
+
+_drop_stubs()
+
+
+# --------------------------------------------------------------------------- #
+# 16. 报错文本压缩
+# --------------------------------------------------------------------------- #
+section("16) 报错文本压缩")
+
+_html = ('<html><head><title>Sorry...</title></head><body><div><p>Sorry, your computer '
+         'or network may be sending automated queries.</p></div></body></html>')
+check("HTML 标签被剥掉", "<" not in engines.brief(_html), engines.brief(_html))
+check("保留可读文字", "automated queries" in engines.brief(_html))
+check("超长被截断", engines.brief("x" * 500).endswith("…"))
+check("换行被压平", "\n" not in engines.brief("a\n\nb"))
+check("空输入不炸", engines.brief("") == "")
+check("None 不炸", engines.brief(None) == "")
+
+
+# --------------------------------------------------------------------------- #
 print("\n" + "=" * 60)
 print("通过 %d 项，失败 %d 项" % (len(PASSED), len(FAILED)))
 for name, detail in FAILED:

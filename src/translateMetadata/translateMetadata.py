@@ -20,10 +20,10 @@ import detect
 import fields
 import log
 from config import load_settings, cache_path
-from engines import EngineError, Router
+from engines import EngineError, Router, normalize_proxy
 from stash_api import StashAPI, StashError
 
-VERSION = "1.0.0"
+VERSION = "1.1.2"
 
 # hook 类型前缀 -> 实体名
 _HOOK_ENTITY = {
@@ -307,7 +307,22 @@ def run_rollback(api, settings, dry_run):
 # 任务：测试引擎
 # --------------------------------------------------------------------------- #
 def run_selftest(settings, router):
+    # 先把「实际生效的配置」摆出来。排查问题时这一屏能省掉很多来回：
+    # 引擎被谁覆盖了、代理串是不是写错了、凭证到底读没读到，一眼可见。
+    log.info("设置来源：%s" % describe_settings_source(settings))
+    raw_proxy = (settings["http_proxy"] or "").strip()
+    if raw_proxy:
+        fixed = normalize_proxy(raw_proxy)
+        if fixed != raw_proxy:
+            log.warning("http_proxy：%s -> 已自动修正为 %s" % (raw_proxy, fixed))
+        else:
+            log.info("http_proxy：%s" % fixed)
+    else:
+        log.info("http_proxy：未设置")
     log.info("引擎优先级：%s" % " -> ".join(router.chain_names() or ["(无)"]))
+    log.info("参数：超时 %ss，请求间隔 %sms，瞬时错误重试 %d 次，熔断阈值 %s"
+             % (settings["timeout_s"], settings["rate_limit_ms"], settings["retry_times"],
+                settings["engine_skip_after"] or "关闭"))
 
     if not router.has_engine():
         text = "没有可用引擎，请检查设置里的引擎与凭证"
@@ -321,6 +336,17 @@ def run_selftest(settings, router):
             log.warning("[失败] %s（%dms）：%s" % (label_text, elapsed, detail))
 
     return "引擎测试完成，详见日志"
+
+
+def describe_settings_source(settings):
+    """说明配置到底是从哪儿来的 —— 这是「改完没生效」类问题最常见的根因。"""
+    keys = getattr(settings, "read_keys", None) or []
+    source = getattr(settings, "source", "defaults")
+    if source == "settings":
+        return "设置页读到 %d 项（%s）" % (len(keys), ", ".join(sorted(keys)))
+    if source == "empty":
+        return "设置页返回了插件但内容为空，全部走内置默认值"
+    return "未能从设置页读到配置，全部走内置默认值"
 
 
 # --------------------------------------------------------------------------- #

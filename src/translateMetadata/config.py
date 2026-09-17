@@ -24,8 +24,10 @@ query PluginSettings($include: [ID!]) {
 
 DEFAULTS = {
     # 引擎
-    "engine": "edge",
-    "engine_fallback": "google",
+    # EDGE 的免费接口已被微软下线（2026-09），所以默认链只留 Google ——
+    # 它是唯一还活着且不需要凭证的引擎。有云端凭证的建议把 tencent 提到第一位。
+    "engine": "google",
+    "engine_fallback": "",
     "target_lang": "zh-CN",
     "source_lang": "auto",
     # 自动翻译开关（按实体）
@@ -44,6 +46,9 @@ DEFAULTS = {
     "keep_original": True,
     "rate_limit_ms": 300,
     "timeout_s": 20,
+    "retry_times": 1,
+    "retry_backoff_ms": 800,
+    "engine_skip_after": 3,
     "batch_size": 100,
     "max_items": 0,
     "cache_enabled": True,
@@ -129,10 +134,13 @@ def to_str(value, default=""):
 class Settings:
     """插件运行配置。"""
 
-    def __init__(self, values=None):
+    def __init__(self, values=None, source="defaults", read_keys=None):
         self._values = dict(DEFAULTS)
         if values:
             self._values.update(values)
+        # 配置是从哪儿来的，用于「改完没生效」这类排查（「测试翻译引擎」任务会打印）
+        self.source = source
+        self.read_keys = list(read_keys or [])
 
     def __getitem__(self, key):
         return self._values.get(key, DEFAULTS.get(key))
@@ -182,6 +190,9 @@ class Settings:
         return {
             "timeout_s": max(5, to_int(self._values.get("timeout_s"), 20)),
             "rate_limit_ms": max(0, to_int(self._values.get("rate_limit_ms"), 300)),
+            "retry_times": max(0, to_int(self._values.get("retry_times"), 1)),
+            "retry_backoff_ms": max(0, to_int(self._values.get("retry_backoff_ms"), 800)),
+            "engine_skip_after": max(0, to_int(self._values.get("engine_skip_after"), 3)),
             "http_proxy": to_str(self._values.get("http_proxy")),
             "baidu_appid": to_str(self._values.get("baidu_appid")),
             "baidu_key": to_str(self._values.get("baidu_key")),
@@ -209,6 +220,8 @@ def load_settings(api, args=None):
     """
     args = args or {}
     overrides = {}
+    from_settings = []
+    from_alias = []
 
     raw = None
     try:
@@ -221,15 +234,17 @@ def load_settings(api, args=None):
         # 设置页的值
         if raw and key in raw and raw[key] is not None and raw[key] != "":
             value = raw[key]
+            from_settings.append(key)
         elif key in args and args[key] is not None:
             value = args[key]
         else:
             # 本插件自己的键没填，看看有没有旧插件命名的同义键
             alias_value = None
             for alias in KEY_ALIASES.get(key, ()):
-                for source in (raw, args):
-                    if source and source.get(alias) not in (None, ""):
-                        alias_value = source[alias]
+                for src in (raw, args):
+                    if src and src.get(alias) not in (None, ""):
+                        alias_value = src[alias]
+                        from_alias.append("%s<-%s" % (key, alias))
                         break
                 if alias_value is not None:
                     break
@@ -252,7 +267,14 @@ def load_settings(api, args=None):
         if key in overrides:
             overrides[key] = to_int(overrides[key], DEFAULTS[key])
 
-    return Settings(overrides)
+    if raw is None:
+        source = "unreadable"
+    elif from_settings or from_alias:
+        source = "settings"
+    else:
+        source = "empty"
+
+    return Settings(overrides, source=source, read_keys=from_settings + from_alias)
 
 
 def cache_path(plugin_dir, server_dir=""):

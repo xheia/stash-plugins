@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 
 # CJK 统一表意文字（含扩展 A、兼容区）
 _CJK = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0002a6df]")
@@ -129,3 +130,48 @@ def strip_text(value) -> str:
     if not isinstance(value, str):
         value = str(value)
     return value.strip()
+
+
+# --------------------------------------------------------------------------- #
+# 退化输出识别
+# --------------------------------------------------------------------------- #
+# 同一字符连续出现这么多次，就当作引擎抽搐了（正常译文里几乎不可能）
+_MAX_CHAR_RUN = 8
+
+
+def looks_degenerate(text) -> bool:
+    """译文是否明显是引擎的退化输出。
+
+    LibreTranslate 处理人名串时会吐出「相相相相相相相相…」这种结果 ——
+    这种内容一旦写进数据库，比翻译失败还难收拾（还得回头找出来删掉）。
+    判定为退化时上层会丢弃该译文并换下一个引擎。
+
+    两条判据（命中任一即算）：
+      1. 同一字符连续出现 8 次以上；
+      2. 单个字符占了全部有效字符的一半以上。
+    两者都只看有内容的字符（字母 / 数字 / 汉字），标点与空格不参与 ——
+    否则「----」这种分隔线会被误判。正常译文两条都碰不到，
+    连「哈哈哈哈」这种正常叠字也放行。
+    """
+    text = strip_text(text)
+    if len(text) < _MAX_CHAR_RUN:
+        return False
+
+    meaningful = [ch for ch in text if ch.isalnum()]
+    if len(meaningful) < _MAX_CHAR_RUN:
+        return False
+
+    run = 1
+    for i in range(1, len(meaningful)):
+        if meaningful[i] == meaningful[i - 1]:
+            run += 1
+            if run >= _MAX_CHAR_RUN:
+                return True
+        else:
+            run = 1
+
+    if len(meaningful) >= 12:
+        top_count = max(Counter(meaningful).values())
+        if top_count >= 0.5 * len(meaningful):
+            return True
+    return False

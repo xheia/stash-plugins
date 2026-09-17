@@ -4,7 +4,7 @@
 
 ## Metadata Translator
 
-把 Stash 里的**标题与简介**自动翻译成中文。支持 **EDGE、Google、百度、腾讯云、阿里云、LibreTranslate** 六种引擎，可配置优先级与失败自动回退。
+把 Stash 里的**标题与简介**自动翻译成中文。支持 **腾讯云、阿里云、百度、LibreTranslate、Google** 五种可用引擎（外加已下线但保留实现的 EDGE），可配置优先级与失败自动回退。
 
 覆盖四个实体：
 
@@ -30,8 +30,8 @@
 ├── src/translateMetadata/          插件源码（就是会被安装的内容）
 │   ├── translateMetadata.yml       插件清单：钩子 / 任务 / 设置项声明
 │   ├── translateMetadata.py        入口：stdin 分发钩子与任务
-│   ├── engines.py                  六个翻译引擎 + 优先级回退路由
-│   ├── detect.py                   中 / 日 / 韩文语言判定
+│   ├── engines.py                  六个翻译引擎 + 优先级回退路由（含熔断与失败诊断）
+│   ├── detect.py                   中 / 日 / 韩文语言判定 + 退化译文识别
 │   ├── cache.py                    SQLite 翻译缓存
 │   ├── config.py                   插件设置读取与类型规范化
 │   ├── fields.py                   实体字段映射、查询与写回构造
@@ -137,26 +137,69 @@ python3 build.py --check    # 只预览会打包哪些文件
 
 | 引擎 | 需要凭证 | 免费额度 | 国内直连 | 中文质量 |
 | --- | --- | --- | --- | --- |
-| `edge` | 不需要 | 无明确限制 | **不通**（需代理） | 好 |
-| `google` | 不需要 | 无明确限制 | **不通**（需代理） | 好 |
-| `baidu` | AppID + 密钥 | 标准版 5 万字符/月 | 通 | 好 |
 | `tencent` | SecretId + SecretKey | 每月 500 万字符（新用户试用额度，以官网为准） | 通 | 好 |
 | `alibaba` | AccessKeyId + AccessKeySecret | 通用版每月 100 万字符（新用户试用额度，以官网为准） | 通 | 好 |
-| `libretranslate` | 视实例而定 | 取决于自托管 | 通 | 一般 |
+| `baidu` | AppID + 密钥 | 标准版 5 万字符/月 | 通 | 好 |
+| `libretranslate` | 视实例而定 | 取决于自托管 | 通 | **一般**（可能吐出退化内容，见下） |
+| `google` | 不需要 | 无明确限制 | **不通**（需代理） | 好 |
+| `edge` | ~~不需要~~ | — | — | ❌ **已被微软下线，不可用** |
 
-> 上表的"国内直连"是实测结论；EDGE 与 Google 的翻译端点在国内网络下无法直连。如果你有代理，填进 `http_proxy` 设置即可（例如 `http://192.168.3.2:7890`）。
+> ### ⚠️ EDGE 引擎已失效（2026-09）
+>
+> 微软下线了为 Edge 浏览器翻译提供的免费令牌接口，`https://edge.microsoft.com/translate/auth`
+> 现在返回 404。这是**服务端下线**，客户端没有可补的密钥、也没有可开的开关。
+>
+> 实测证据（两条独立网络路径都复现，可自查）：
+> ```bash
+> curl -sS -o /dev/null -w '%{http_code}\n' https://edge.microsoft.com/translate/auth
+> # -> 404
+> ```
+> 该域名解析到微软真实 IP、TLS 证书由 Microsoft TLS G2 RSA CA 签发（不是劫持），
+> 响应头带 `X-Falcon-RouterStatusCode: SuccessfullyForwarded (404)` ——
+> 请求确实到了微软后端，后端说这条路径不存在。不带 token 直接打翻译端点则是 401。
+>
+> 代码里仍保留 `edge` 引擎实现，万一微软恢复可直接用；但它已不在默认链里，
+> 日志会明确写出下线的结论，而不会让你以为是自己的配置问题。
+
+> **国内直连环境下，目前真正可用的是腾讯云 / 阿里云 / 百度 / 自托管 LibreTranslate。**
+> Google 的免费端点 `translate.googleapis.com` 在国内不通，且对出口 IP 限流很凶（HTTP 429）。
+> 有代理的话把地址填进 `http_proxy`。
 >
 > **公共 LibreTranslate 实例基本都已要求 API Key**，建议自托管：
 > ```bash
 > docker run -d --name libretranslate -p 5000:5000 libretranslate/libretranslate:latest
 > ```
 > 然后把 `libretranslate_url` 填成 `http://<宿主机IP>:5000`（注意 Stash 在容器里，写 `localhost` 指的是容器自己）。
+>
+> ⚠️ LibreTranslate 的译文质量明显弱于云厂商，遇到人名串时可能吐出
+> 「相相相相相相相相…」这类退化内容。插件会**丢弃**这种译文并降级到下一个引擎
+> （实测已拦截），但更根本的办法是别把它放在链首。
 
 ### 推荐配置
 
-**国内直连、开箱即用** → 主引擎 `baidu`，回退 `tencent`
+**国内直连（推荐）** → 主引擎 `tencent`，回退 `alibaba,libretranslate`
 
-**有代理** → 主引擎 `edge`，回退 `baidu`（EDGE 免费且质量好，百度兜底）
+```
+engine:          tencent
+engine_fallback: alibaba,libretranslate
+```
+
+腾讯云与阿里云都是每月百万字符级的试用额度，质量稳定、国内直连。两者交替回退可以互相兜底。
+
+**有代理** → 主引擎 `google`，回退 `tencent,alibaba`
+
+```
+engine:          google
+engine_fallback: tencent,alibaba
+http_proxy:      http://192.168.3.2:7890
+```
+
+**只有自托管 LibreTranslate（零成本）** → 主引擎 `libretranslate`，回退留空
+
+```
+engine:          libretranslate
+libretranslate_url: http://192.168.3.96:5353
+```
 
 ### 百度翻译
 
@@ -168,7 +211,19 @@ python3 build.py --check    # 只预览会打包哪些文件
 
 1. 到 https://console.cloud.tencent.com/tmt 开通机器翻译
 2. 在 https://console.cloud.tencent.com/cam/capi 新建密钥，拿到 **SecretId** / **SecretKey**
-3. 填进 `tencent_secret_id` / `tencent_secret_key`；地域默认 `ap-guangzhou` 一般不用改
+3. 填进 `tencent_secret_id` / `tencent_secret_key`
+
+`tencent_region` 三种写法都认，默认 `ap-guangzhou`：
+
+| 你填的 | 实际使用 |
+| --- | --- |
+| `ap-guangzhou` | host `tmt.ap-guangzhou.tencentcloudapi.com`，region `ap-guangzhou` |
+| `https://tmt.tencentcloudapi.com` | host `tmt.tencentcloudapi.com`，region 回落 `ap-guangzhou` |
+| `tmt.ap-shanghai.tencentcloudapi.com` | host 同上，region `ap-shanghai` |
+
+> 早先版本会把整串原样塞进 `X-TC-Region` 请求头，服务端回
+> `InvalidParameterValue: The value specified in X-TC-Region is invalid`。
+> 现在会自动拆分，**填接口地址也能正常工作**（已实测）。
 
 ### 阿里云机器翻译
 
@@ -183,6 +238,9 @@ python3 build.py --check    # 只预览会打包哪些文件
 > 与腾讯云的 TC3-HMAC-SHA256 不是一回事，代码里是两套独立实现。
 > 签名实现已用阿里云官方文档给出的签名测试向量逐字节校验（见 `tests/test_engines.py`），
 > 签名正确性可离线回归。
+>
+> `TranslateGeneral` 的 `FormatType` 是必填项（`text` / `html`）。
+> 早期版本漏传这个参数，会收到误导性的报错 —— 见下方「排错」里的记账。
 
 ### 从旧插件迁移凭证
 
@@ -201,9 +259,9 @@ python3 build.py --check    # 只预览会打包哪些文件
 
 在自己插件的设置页里显式填过的值优先，旧键名只是兜底。
 
-> `translateTencentRegion` **不会**被认领。旧插件里这个键存的是接口地址
-> （`https://tmt.tencentcloudapi.com`），而本插件的 `tencent_region` 要的是地域
-> （`ap-guangzhou`）。张冠李戴会把请求打到错误地域上，所以这里故意不映射。
+> `translateTencentRegion` **不会**被自动认领 —— 旧插件里这个键存的是接口地址，
+> 语义与 `tencent_region`（地域）不同，静默搬运容易埋雷。
+> 不过 `tencent_region` 本身现在已兼容接口地址写法，你直接把它填进去也能正常工作。
 
 ---
 
@@ -211,8 +269,8 @@ python3 build.py --check    # 只预览会打包哪些文件
 
 | 设置 | 默认 | 说明 |
 | --- | --- | --- |
-| `engine` | `edge` | 主引擎，见上表 |
-| `engine_fallback` | `google` | 回退链，逗号分隔，前一个失败自动试下一个 |
+| `engine` | `google` | 主引擎，见上表 |
+| `engine_fallback` | 空 | 回退链，逗号分隔，前一个失败自动试下一个。留空表示不回退 |
 | `target_lang` | `zh-CN` | 目标语言，也支持 `zh-TW` / `en` / `ja` / `ko` / `ru` |
 | `source_lang` | `auto` | 源语言，`auto` 自动检测 |
 | `auto_scene` | 开 | 场景自动翻译 |
@@ -228,10 +286,13 @@ python3 build.py --check    # 只预览会打包哪些文件
 | `keep_original` | 开 | 把原文存进 `custom_fields`，可一键回滚 |
 | `rate_limit_ms` | `300` | 两次请求的最小间隔，防止触发限流 |
 | `timeout_s` | `20` | 单个请求超时 |
+| `retry_times` | `1` | 瞬时错误（429 限流 / 5xx）重试次数，0 = 不重试 |
+| `retry_backoff_ms` | `800` | 重试等待，按次数递增 |
+| `engine_skip_after` | `3` | 某引擎连续失败这么多次后，本轮不再试它（熔断）。0 = 关闭 |
 | `batch_size` | `100` | 批量任务每页条数 |
 | `max_items` | `0` | 单次任务处理上限，0 = 不限 |
 | `cache_enabled` | 开 | 相同文本只请求一次接口 |
-| `http_proxy` | 空 | 走 EDGE / Google 时可能需要 |
+| `http_proxy` | 空 | 走 Google 时需要。`http://192.168.3.2:7890` 或只写 `192.168.3.2:7890` 都认 |
 
 凭证类（不填则对应引擎不可用，会自动从引擎链里剔除）：
 
@@ -312,7 +373,30 @@ Stash 找不到 Python。设置 → 系统 → 应用程序路径 → Python 可
 4. 注意只有场景 / 演员 / 工作室 / 标签四类实体会触发；图片、合集、系列不在范围内
 
 **翻译失败 / 全部引擎均失败**
-跑「测试翻译引擎」任务，日志里会逐个列出各引擎的成功或失败原因。常见原因：凭证没填、余额/额度用尽、国内直连不到 EDGE / Google（填 `http_proxy`）、LibreTranslate 实例要求 API Key。
+跑「测试翻译引擎」任务 —— 它会先把**实际生效的配置**打出来（设置从哪来的、引擎链、代理值、
+凭证是否读到），再逐个引擎试翻译并列出成功或失败原因。绝大多数问题在这一屏就能看出答案。
+
+**⚠️ 所有引擎都报 `Name or service not known`**
+几乎一定是 `http_proxy` 写错了。最常见的写法错误是**少了两个斜杠**：
+
+```
+http:192.168.3.96:7890      ← 错误
+http://192.168.3.96:7890    ← 正确
+```
+
+少了斜杠时 urllib 会把整个串当成 authority，主机名解析成 `http:192.168.3.96`，
+于是每一个引擎都报 DNS 解析失败 —— 看起来像所有翻译接口同时挂了，其实是本地配置问题。
+1.1.2 起插件会自动补上斜杠并在日志里提示，但**还是建议按规范写**。
+只写 `192.168.3.96:7890` 也认。
+
+**译文是一串重复字符（如「相相相相相相…」）**
+LibreTranslate 对人名串会这样。1.1.2 起插件会判定为退化输出并丢弃，降级到下一个引擎。
+如果你之前的库里已经被写进了这种内容，跑「清空翻译缓存」后重跑翻译任务即可
+（注意：清缓存不会改已写入的字段，需要先用「回滚翻译」再重翻）。
+
+**引擎突然全部报同一个错，之前是好的**
+先看是不是链首引擎挂了。1.1.2 起有熔断：某引擎连续失败 3 次后本轮不再尝试它，
+避免上百条数据反复空等超时（`engine_skip_after` 可调，设 0 关闭）。
 
 各云厂商的报错含义（都遇到过，直接照着查）：
 
@@ -320,14 +404,23 @@ Stash 找不到 Python。设置 → 系统 → 应用程序路径 → Python 可
 | --- | --- | --- |
 | 腾讯云 `AuthFailure.SecretIdNotFound` | SecretId 不存在 | 核对 `tencent_secret_id`，注意别把 SecretKey 填串了 |
 | 腾讯云 `AuthFailure.SignatureFailure` | 签名不对 | 检查系统时间是否偏差过大（签名带时间戳） |
+| 腾讯云 `InvalidParameterValue: X-TC-Region is invalid` | `tencent_region` 填的是接口地址 | 1.1.2 起已自动兼容；升级即可，或改填 `ap-guangzhou` |
 | 阿里云 `InvalidAccessKeyId.NotFound` | AccessKeyId 不存在 | 核对 `alibaba_access_key` |
 | 阿里云 `InvalidAccessKeyId.Inactive` | **AccessKey 已被禁用** | 到 RAM 控制台把该 AK 重新启用，或换一个 |
 | 阿里云 `SignatureDoesNotMatch` | 签名不对 | 核对 `alibaba_access_secret`；这个报错说明 AK 本身是有效的 |
+| 阿里云 `InvalidAccountStatus: 账号没有开通服务` | 没开通机器翻译 | 到 https://mt.console.aliyun.com/ 开通；也可能是因为请求缺必填参数 |
+| 阿里云 `FormatType is mandatory for this action` | 请求缺 `FormatType` | 1.1.2 起已补上；升级即可 |
 | 阿里云 `NotSupported` / 语言不支持 | 目标语言码不在该账号可用列表 | 换 `target_lang`（如 `zh-CN` → `zh-TW`） |
 | 百度 `52003: UNAUTHORIZED USER` | AppID 无效 | 核对 `baidu_appid`，确认已开通「通用文本翻译」 |
+| Google `HTTP 429` | 出口 IP 被限流 | 换引擎，或把 `rate_limit_ms` 调大；免费端点对共享 IP 限制很凶 |
+| EDGE `HTTP 404` | 微软已下线该免费接口 | 无解，换引擎。见上文「EDGE 引擎已失效」 |
 
 > 注意报错顺序：阿里云会先校验 AccessKey 再校验签名，所以 AK 有问题时不会出现
 > `SignatureDoesNotMatch`。换句话说，看到 `InvalidAccessKeyId.*` 时无法据此判断签名是否正确。
+>
+> 同理，阿里云在请求缺少必填参数（如 `FormatType`）时可能回一个与参数无关的
+> `InvalidAccountStatus`，让人误以为是账号没开通。**遇到含义可疑的报错时，
+> 先确认请求参数齐全** —— 这是踩过一次坑的结论。
 
 **批量任务跑到一半提示失败**
 多半是免费额度用尽或被限流。把 `rate_limit_ms` 调大（比如 1000），用 `max_items` 限制单次处理量，分几次跑完。
@@ -337,7 +430,8 @@ Stash 找不到 Python。设置 → 系统 → 应用程序路径 → Python 可
 ## 开发
 
 ```bash
-# 1) 引擎单元测试：语言码映射、地址归一化、阿里云签名（用官方文档向量校验）、路由降级
+# 1) 引擎单元测试：语言码映射、代理/接入地址归一化、阿里云签名（用官方文档向量校验）、
+#    腾讯云地域拆分、必填参数、退化译文拦截、熔断、失败报告
 python3 tests/test_engines.py
 
 # 2) 清单与结构校验（不需要网络）
@@ -353,7 +447,18 @@ python3 tests/test_pipeline.py
 python3 build.py
 ```
 
-测试覆盖：清单严格字段校验、索引一致性、**schema 契约**、语言码映射、阿里云 HMAC-SHA1 签名（官方文档向量）、接入地址归一化、旧插件键名兼容、语言判定、干跑、写回、`custom_fields` 原文留存、幂等、钩子分发、标签别名模式、缓存命中、回滚、引擎全挂时的降级、打包可复现性。
+测试覆盖：清单严格字段校验、索引一致性、**schema 契约**、语言码映射、阿里云 HMAC-SHA1 签名（官方文档向量）、代理地址归一化、腾讯云地域拆分、云接口必填参数、退化译文拦截、引擎熔断、接入地址归一化、旧插件键名兼容、语言判定、干跑、写回、`custom_fields` 原文留存、幂等、钩子分发、标签别名模式、缓存命中、回滚、引擎全挂时的降级、打包可复现性。
+
+### 一些踩过的坑（都固化成测试了）
+
+| 坑 | 症状 | 现在怎么防 |
+| --- | --- | --- |
+| `http_proxy` 少写 `//` | **每个**引擎都报 `Name or service not known`，像是所有翻译接口挂了 | `normalize_proxy()` 自动补齐 + 单测覆盖 13 种写法 |
+| `tencent_region` 填接口地址 | `X-TC-Region is invalid` | `normalize_tencent_endpoint()` 自动拆 host/region |
+| 阿里云漏传 `FormatType` | 报 `InvalidAccountStatus: 账号没有开通服务`（**与真实原因无关**） | 参数齐全性单测 |
+| LibreTranslate 输出 `相相相相…` | 垃圾译文被当成成功写进库 | `looks_degenerate()` 拦截并降级 |
+| 链首引擎死掉 | 上百条数据每条都白等一次超时 | Router 熔断（连续失败 3 次即跳过） |
+| GraphQL 类型名拼错 | `Unknown type "SUpdateInputcene"`，写回全线失效 | schema 契约测试 + 假服务入口校验 |
 
 ### 为什么要有 schema 契约测试
 

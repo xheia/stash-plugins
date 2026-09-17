@@ -484,9 +484,20 @@ def main():
     # 什么设置都没有也要能跑起来（退回内置默认）
     blank = config_mod.load_settings(FakeApi({}), {})
     check("无任何设置时回退内置默认引擎链",
-          blank.engine_chain == ["edge", "google"], str(blank.engine_chain))
+          blank.engine_chain == ["google"], str(blank.engine_chain))
+    check("默认链不含已下线的 edge", "edge" not in blank.engine_chain, str(blank.engine_chain))
     check("无任何设置时阿里云凭证为空",
           not blank.engine_options()["alibaba_access_key"])
+    check("默认开启瞬时错误重试", blank.engine_options()["retry_times"] == 1)
+    check("默认开启引擎熔断", blank.engine_options()["engine_skip_after"] == 3)
+
+    # 设置来源要能被看出来，这是「改完没生效」类问题的第一手线索
+    check("无设置时标注来源为设置页内容为空", blank.source == "empty", blank.source)
+    filled = config_mod.load_settings(FakeApi({"engine": "tencent", "tencent_secret_id": "x"}), {})
+    check("有设置时标注来源为设置页", filled.source == "settings", filled.source)
+    check("来源里带上生效的键名",
+          "engine" in filled.read_keys and "tencent_secret_id" in filled.read_keys,
+          str(filled.read_keys))
 
     # 读设置失败（接口报错）不应中断任务
     class BoomApi:
@@ -494,7 +505,8 @@ def main():
             raise RuntimeError("configuration 查询失败")
 
     safe = config_mod.load_settings(BoomApi(), {})
-    check("读设置失败时退回默认值", safe.engine_chain == ["edge", "google"], str(safe.engine_chain))
+    check("读设置失败时退回默认值", safe.engine_chain == ["google"], str(safe.engine_chain))
+    check("读设置失败时标注来源不可读", safe.source == "unreadable", safe.source)
 
     server.shutdown()
     if os.path.exists(cache_file):

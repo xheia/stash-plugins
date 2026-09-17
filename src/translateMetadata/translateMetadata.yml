@@ -11,9 +11,10 @@
 name: Metadata Translator
 description: >-
   把场景 / 演员 / 工作室 / 标签的标题与简介自动翻译成中文。
-  支持 EDGE、Google、百度、腾讯云、阿里云、LibreTranslate 六种引擎，可配置优先级与失败回退；
+  支持 Google、百度、腾讯云、阿里云、LibreTranslate 引擎，可配置优先级与失败回退；
   刮削（场景创建 / 更新）时自动触发，也可在任务页手动批量执行。
-version: 1.1.1
+  注：EDGE 免费接口已被微软下线（2026-09），该引擎保留但已不可用。
+version: 1.1.2
 url: https://github.com/xheia/stash-plugins
 
 exec:
@@ -108,12 +109,13 @@ ui:
 settings:
   engine:
     displayName: 主翻译引擎
-    description: "可填：edge / google / baidu / tencent / alibaba / libretranslate"
+    description: "可填：google / tencent / alibaba / baidu / libretranslate / edge。
+      edge 的免费接口已被微软下线（2026-09），填了也只会失败。"
     type: STRING
 
   engine_fallback:
     displayName: 回退引擎链
-    description: 主引擎失败时按顺序尝试，英文逗号分隔，例如 edge,google
+    description: 主引擎失败时按顺序尝试，英文逗号分隔，例如 tencent,alibaba,google。留空表示不回退
     type: STRING
 
   target_lang:
@@ -188,6 +190,22 @@ settings:
     displayName: 单个请求超时（秒）
     type: NUMBER
 
+  retry_times:
+    displayName: 瞬时错误重试次数
+    description: 仅对 429 限流与 5xx 服务端错误重试，默认 1；填 0 表示不重试
+    type: NUMBER
+
+  retry_backoff_ms:
+    displayName: 重试等待（毫秒）
+    description: 默认 800，按次数递增
+    type: NUMBER
+
+  engine_skip_after:
+    displayName: 引擎熔断阈值
+    description: 某引擎连续失败达到该次数后，本轮任务不再尝试它，避免上百条数据反复空等。
+      默认 3，填 0 表示关闭熔断
+    type: NUMBER
+
   batch_size:
     displayName: 批量任务每页条数
     type: NUMBER
@@ -204,7 +222,9 @@ settings:
 
   http_proxy:
     displayName: HTTP 代理
-    description: 可选。国内直连 Google / EDGE 不通时填写，例如 http://192.168.3.2:7890
+    description: 可选。国内直连 Google 不通时填写，例如 http://192.168.3.2:7890。
+      也可以只写 192.168.3.2:7890。填了代理后，内网地址（如自托管 LibreTranslate）会自动直连。
+      注意：只支持 HTTP 代理，不支持 socks5://
     type: STRING
 
   baidu_appid:
@@ -225,12 +245,14 @@ settings:
 
   tencent_region:
     displayName: 腾讯云地域
-    description: 默认 ap-guangzhou
+    description: 默认 ap-guangzhou。填接口地址（https://tmt.tencentcloudapi.com）或
+      tmt.ap-guangzhou.tencentcloudapi.com 也能识别
     type: STRING
 
   alibaba_access_key:
     displayName: 阿里云 AccessKey ID
-    description: RAM 用户的 AccessKeyId，需要「机器翻译」权限
+    description: RAM 用户的 AccessKeyId。注意：还需在阿里云控制台「开通机器翻译服务」，
+      否则会报 InvalidAccountStatus 账号没有开通服务
     type: STRING
 
   alibaba_access_secret:

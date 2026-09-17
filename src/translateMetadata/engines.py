@@ -16,11 +16,14 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+
+import detect
 
 
 class EngineError(Exception):
@@ -71,9 +74,79 @@ def is_chinese_code(code) -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# 代理地址规范化
+#
+# 实测教训：把代理写成 `http:192.168.3.96:7890`（少了两个斜杠）时，urllib 会把它
+# 整体当成 authority，主机名变成 `http:192.168.3.96`，于是**每一个**引擎都报
+# `[Errno -2] Name or service not known`，看起来像所有翻译接口同时挂掉。
+# 这里统一收口，把常见写法都整理成 urllib 认识的样子。
+# --------------------------------------------------------------------------- #
+# 只写了一个冒号、没有斜杠的协议头（http:host:port）。
+# 末尾的 (?=.*:) 很关键：必须后面还有冒号才认定这是「协议头 + host:port」，
+# 否则 `proxy.lan:7890` 这种正常的 host:port 会被误伤成 `proxy.lan://7890`。
+_PROXY_SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+\-]*):(?!//)(?=.*:)")
+
+_PRIVATE_V4_PREFIXES = ("10.", "127.", "192.168.", "169.254.")
+
+
+def normalize_proxy(value):
+    """把用户填的代理地址整理成 `scheme://host:port`。
+
+    容忍 `http:host:port`、`host:port`、`http://host:port/`、带账号密码等写法。
+    """
+    raw = (value or "").strip().strip("\"'").strip()
+    if not raw:
+        return ""
+    raw = raw.rstrip("/")
+    fixed = _PROXY_SCHEME_RE.sub(lambda m: m.group(1) + "://", raw)
+    if "://" not in fixed:
+        fixed = "http://" + fixed
+    return fixed
+
+
+def is_local_host(host):
+    """本机 / 内网地址：这些请求不该绕代理。
+
+    典型场景：LibreTranslate 跑在同一台 NAS 上（192.168.3.96:5353），
+    把它的流量丢给代理是没必要的，代理规则不巧还会把它拦掉。
+    """
+    host = (host or "").strip().strip("[]").lower()
+    if not host:
+        return False
+    if host == "localhost" or host.endswith(".localhost") or host == "::1":
+        return True
+    if "." not in host:          # 裸主机名（docker 服务名、NAS 名等）
+        return True
+    if any(host.startswith(prefix) for prefix in _PRIVATE_V4_PREFIXES):
+        return True
+    parts = host.split(".")
+    if host.startswith("172.") and len(parts) >= 2 and parts[1].isdigit():
+        return 16 <= int(parts[1]) <= 31
+    if host.startswith("100.") and len(parts) >= 2 and parts[1].isdigit():
+        return 64 <= int(parts[1]) <= 127     # 运营商 CGNAT 段
+    return False
+
+
+# 这些状态码是「服务端忙」，值得重试一次；其余 4xx 是「请求本身不对」，重试没意义
+TRANSIENT_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
+
+_TAG_RE = re.compile(r"<[^>]{0,2000}?>")
+
+
+def brief(text, limit=160):
+    """把 HTML 报错页压成一行可读文字 —— 否则日志里全是 `<!DOCTYPE html>`。"""
+    text = _TAG_RE.sub(" ", text or "")
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > limit:
+        text = text[:limit] + "…"
+    return text
+
+
+# --------------------------------------------------------------------------- #
 # HTTP 基础
 # --------------------------------------------------------------------------- #
-def http_request(url, method="GET", headers=None, data=None, timeout=20, proxy=""):
+def http_request(url, method="GET", headers=None, data=None, timeout=20, proxy="",
+                 retries=0, backoff_ms=800):
     """发起一次 HTTP 请求，返回 (状态码, 响应字节)。
 
     不发送 Accept-Encoding: gzip，这样 urllib 不需要额外解压。
@@ -83,35 +156,54 @@ def http_request(url, method="GET", headers=None, data=None, timeout=20, proxy="
     for key, value in headers.items():
         req.add_header(key, value)
 
-    handlers = []
+    proxy = normalize_proxy(proxy)
+    if proxy and proxy.split(":", 1)[0].lower().startswith("socks"):
+        raise EngineError(
+            "不支持 SOCKS 代理（Python 标准库限制）：%s。请改填 HTTP 代理端口 —— "
+            "Clash 的混合端口（默认 7890）本身就同时支持 HTTP。" % proxy
+        )
+
+    host = urllib.parse.urlsplit(url).hostname or ""
+    if proxy and is_local_host(host):
+        proxy = ""      # 内网地址直连
+
     if proxy:
-        handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+        handlers = [urllib.request.ProxyHandler({"http": proxy, "https": proxy})]
     else:
-        # 显式使用环境变量里的代理设置（默认行为），这里保持默认即可
-        handlers.append(urllib.request.ProxyHandler())
+        # 不传代理时沿用环境变量里的设置（保持默认行为）
+        handlers = [urllib.request.ProxyHandler()]
     opener = urllib.request.build_opener(*handlers)
 
-    try:
-        with opener.open(req, timeout=timeout) as resp:
-            return resp.status, resp.read()
-    except urllib.error.HTTPError as exc:
-        detail = ""
+    attempts = max(1, int(retries) + 1)
+    for attempt in range(attempts):
         try:
-            detail = exc.read().decode("utf-8", "replace")[:300]
-        except Exception:
-            pass
-        raise EngineError("HTTP %s %s" % (exc.code, detail)) from exc
-    except urllib.error.URLError as exc:
-        raise EngineError("网络错误: %s" % (exc.reason,)) from exc
-    except Exception as exc:  # 超时等
-        raise EngineError("请求失败: %s" % (exc,)) from exc
+            with opener.open(req, timeout=timeout) as resp:
+                return resp.status, resp.read()
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = brief(exc.read().decode("utf-8", "replace"))
+            except Exception:
+                pass
+            if exc.code in TRANSIENT_STATUS and attempt + 1 < attempts:
+                time.sleep(backoff_ms * (attempt + 1) / 1000.0)
+                continue
+            suffix = "（服务端限流，稍后重试或改用其它引擎）" if exc.code == 429 else ""
+            raise EngineError("HTTP %s %s%s" % (exc.code, detail, suffix)) from exc
+        except urllib.error.URLError as exc:
+            raise EngineError("网络错误: %s" % (exc.reason,)) from exc
+        except Exception as exc:  # 超时等
+            raise EngineError("请求失败: %s" % (exc,)) from exc
+
+    raise EngineError("请求失败：重试次数已用尽")
 
 
-def json_request(url, method="POST", headers=None, payload=None, timeout=20, proxy=""):
+def json_request(url, method="POST", headers=None, payload=None, timeout=20, proxy="",
+                 retries=0, backoff_ms=800):
     body = None
     if payload is not None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    status, raw = http_request(url, method, headers, body, timeout, proxy)
+    status, raw = http_request(url, method, headers, body, timeout, proxy, retries, backoff_ms)
     try:
         return json.loads(raw.decode("utf-8", "replace"))
     except ValueError as exc:
@@ -127,7 +219,9 @@ class BaseEngine:
         options = options or {}
         self.timeout = int(options.get("timeout_s") or 20)
         self.rate_limit_ms = int(options.get("rate_limit_ms") or 0)
-        self.proxy = (options.get("http_proxy") or "").strip()
+        self.proxy = normalize_proxy(options.get("http_proxy"))
+        self.retries = max(0, int(options.get("retry_times") or 0))
+        self.backoff_ms = max(0, int(options.get("retry_backoff_ms") or 800))
         self._last_request = 0.0
 
     # -- 内部工具 ---------------------------------------------------------- #
@@ -149,12 +243,14 @@ class BaseEngine:
             body = urllib.parse.urlencode(form).encode("utf-8")
             hdrs = dict(headers or {})
             hdrs.setdefault("Content-Type", "application/x-www-form-urlencoded")
-            status, raw = http_request(url, method, hdrs, body, self.timeout, self.proxy)
+            status, raw = http_request(url, method, hdrs, body, self.timeout, self.proxy,
+                                       self.retries, self.backoff_ms)
             try:
                 return json.loads(raw.decode("utf-8", "replace"))
             except ValueError as exc:
                 raise EngineError("响应不是合法 JSON: %s" % (raw[:200],)) from exc
-        return json_request(url, method, headers, payload, self.timeout, self.proxy)
+        return json_request(url, method, headers, payload, self.timeout, self.proxy,
+                            self.retries, self.backoff_ms)
 
     # -- 对外接口 ---------------------------------------------------------- #
     def available(self):
@@ -176,6 +272,14 @@ class BaseEngine:
 # 1. EDGE —— 微软 Edge 浏览器内置翻译接口（免费、无需 Key）
 #    GET  https://edge.microsoft.com/translate/auth        取短期 JWT
 #    POST https://api-edge.cognitive.microsofttranslator.com/translate
+#
+#    ⚠️ 2026-09 实测：**这个免费接口已被微软下线**，客户端无法修复。
+#       证据（两条独立网络路径都复现）：
+#         * GET auth 端点 -> HTTP 404，证书签发者是 Microsoft TLS G2 RSA CA、DNS 指向
+#           微软真实 IP（非劫持），响应头 X-Falcon-RouterStatusCode: SuccessfullyForwarded (404)
+#           —— 即请求确实到了微软后端，后端说这条路径不存在
+#         * 不带 token 直接 POST translate 端点 -> 401 credentials are missing or invalid
+#       也就是说没有可补的密钥、也没有可开的开关。实现保留在这里，仅备微软恢复。
 # --------------------------------------------------------------------------- #
 class EdgeEngine(BaseEngine):
     name = "edge"
@@ -183,6 +287,10 @@ class EdgeEngine(BaseEngine):
     API_URL = "https://api-edge.cognitive.microsofttranslator.com/translate"
     UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
           "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0")
+    OFFLINE_REASON = (
+        "微软已下线 Edge 浏览器的免费翻译令牌接口（edge.microsoft.com/translate/auth 返回 404），"
+        "此引擎当前不可用且客户端无法修复。请改用 google / 腾讯云 / 阿里云 / LibreTranslate。"
+    )
 
     def __init__(self, options=None):
         super().__init__(options)
@@ -201,8 +309,10 @@ class EdgeEngine(BaseEngine):
             proxy=self.proxy,
         )
         token = raw.decode("utf-8", "replace").strip()
+        if status == 404:
+            raise EngineError("EDGE 取 token 失败 (HTTP 404)：%s" % self.OFFLINE_REASON)
         if status != 200 or not token or len(token) < 20:
-            raise EngineError("EDGE 取 token 失败 (HTTP %s): %s" % (status, token[:200]))
+            raise EngineError("EDGE 取 token 失败 (HTTP %s): %s" % (status, brief(token)))
         self._token = token
         self._token_at = time.time()
         return token
@@ -261,6 +371,8 @@ class GoogleEngine(BaseEngine):
             headers={"User-Agent": self.UA, "Accept": "*/*"},
             timeout=self.timeout,
             proxy=self.proxy,
+            retries=self.retries,
+            backoff_ms=self.backoff_ms,
         )
         if status != 200:
             raise EngineError("Google 返回 HTTP %s" % status)
@@ -339,10 +451,43 @@ class BaiduEngine(BaseEngine):
 
 # --------------------------------------------------------------------------- #
 # 4. 腾讯云机器翻译 TMT（TC3-HMAC-SHA256 签名）
+#
+#    tencent_region 这个键历史上有两种填法：真正的「地域」（ap-guangzhou），
+#    以及接口地址（https://tmt.tencentcloudapi.com）。旧插件用的是后者，用户
+#    很容易照抄。两种都得认 —— 否则接口地址会被塞进 X-TC-Region，服务端直接
+#    回 InvalidParameterValue: The value specified in `X-TC-Region` is invalid。
 # --------------------------------------------------------------------------- #
+TENCENT_DEFAULT_HOST = "tmt.tencentcloudapi.com"
+TENCENT_DEFAULT_REGION = "ap-guangzhou"
+
+
+def normalize_tencent_endpoint(value):
+    """把用户填的腾讯云地域 / 地址整理成 (host, region)。"""
+    raw = (value or "").strip()
+    if not raw:
+        return TENCENT_DEFAULT_HOST, TENCENT_DEFAULT_REGION
+
+    if "//" in raw:
+        parsed = urllib.parse.urlsplit(raw if raw.startswith("http") else "https://" + raw)
+        host = parsed.netloc or parsed.path
+    elif "." in raw:
+        host = raw
+    else:
+        # 裸地域，如 ap-guangzhou
+        return "tmt.%s.tencentcloudapi.com" % raw, raw
+
+    host = host.strip("/").lower()
+    prefix, suffix = "tmt.", ".tencentcloudapi.com"
+    if host.startswith(prefix) and host.endswith(suffix):
+        region = host[len(prefix):-len(suffix)]
+        if region:
+            return host, region
+    return host, TENCENT_DEFAULT_REGION
+
+
 class TencentEngine(BaseEngine):
     name = "tencent"
-    HOST = "tmt.tencentcloudapi.com"
+    HOST = TENCENT_DEFAULT_HOST
     SERVICE = "tmt"
     VERSION = "2018-03-21"
     ACTION = "TextTranslate"
@@ -354,7 +499,7 @@ class TencentEngine(BaseEngine):
         options = options or {}
         self.secret_id = (options.get("tencent_secret_id") or "").strip()
         self.secret_key = (options.get("tencent_secret_key") or "").strip()
-        self.region = (options.get("tencent_region") or "ap-guangzhou").strip()
+        self.host, self.region = normalize_tencent_endpoint(options.get("tencent_region"))
 
     def available(self):
         return bool(self.secret_id and self.secret_key)
@@ -371,7 +516,7 @@ class TencentEngine(BaseEngine):
         credential_scope = "%s/%s/tc3_request" % (date, self.SERVICE)
 
         hashed_payload = hashlib.sha256(payload_str.encode("utf-8")).hexdigest()
-        canonical_headers = "content-type:%s\nhost:%s\n" % (self.CONTENT_TYPE, self.HOST)
+        canonical_headers = "content-type:%s\nhost:%s\n" % (self.CONTENT_TYPE, self.host)
         signed_headers = "content-type;host"
         canonical_request = "\n".join([
             "POST", "/", "", canonical_headers, signed_headers, hashed_payload,
@@ -412,7 +557,7 @@ class TencentEngine(BaseEngine):
         headers = {
             "Authorization": self._sign(payload_str, timestamp),
             "Content-Type": self.CONTENT_TYPE,
-            "Host": self.HOST,
+            "Host": self.host,
             "X-TC-Action": self.ACTION,
             "X-TC-Version": self.VERSION,
             "X-TC-Timestamp": str(timestamp),
@@ -421,12 +566,14 @@ class TencentEngine(BaseEngine):
 
         self._throttle()
         status, raw = http_request(
-            "https://" + self.HOST,
+            "https://" + self.host,
             method="POST",
             headers=headers,
             data=payload_str.encode("utf-8"),
             timeout=self.timeout,
             proxy=self.proxy,
+            retries=self.retries,
+            backoff_ms=self.backoff_ms,
         )
         try:
             data = json.loads(raw.decode("utf-8", "replace"))
@@ -462,6 +609,7 @@ class AlibabaEngine(BaseEngine):
     DETECT_ACTION = "GetDetectLanguage"
     VERSION = "2018-10-12"
     SCENE = "general"          # general=通用场景；电商场景可改 goods
+    FORMAT_TYPE = "text"       # 实测必传，缺了会报 FormatType is mandatory for this action
     DEFAULT_HOST = "mt.aliyuncs.com"
 
     def __init__(self, options=None):
@@ -546,6 +694,8 @@ class AlibabaEngine(BaseEngine):
             data=body,
             timeout=self.timeout,
             proxy=self.proxy,
+            retries=self.retries,
+            backoff_ms=self.backoff_ms,
         )
         try:
             data = json.loads(raw.decode("utf-8", "replace"))
@@ -575,6 +725,7 @@ class AlibabaEngine(BaseEngine):
                 "TargetLanguage": target_lang,
                 "SourceText": text,
                 "Scene": self.SCENE,
+                "FormatType": self.FORMAT_TYPE,
             })
 
         try:
@@ -663,7 +814,7 @@ ENGINE_CLASSES = {
 }
 
 ENGINE_LABELS = {
-    "edge": "EDGE（免费）",
+    "edge": "EDGE（免费，微软已下线）",
     "google": "Google（免费）",
     "baidu": "百度翻译",
     "tencent": "腾讯云 TMT",
@@ -671,7 +822,9 @@ ENGINE_LABELS = {
     "libretranslate": "LibreTranslate",
 }
 
-DEFAULT_CHAIN = ["edge", "google"]
+# 默认链只留 Google —— 它是唯一还活着且不需要凭证的引擎。
+# EDGE 已于 2026-09 被微软下线，仍可手动选，但不再放在默认链里浪费请求。
+DEFAULT_CHAIN = ["google"]
 
 
 class TranslateResult:
@@ -692,13 +845,20 @@ class TranslateResult:
 
 
 class Router:
-    """按优先级串联多个引擎，失败自动降级。"""
+    """按优先级串联多个引擎，失败自动降级。
+
+    另外带一个「熔断」：某个引擎连续失败若干次后，本轮就不再试它。
+    批量任务动辄上百条，如果链首引擎是死的，不熔断就会每条都白等一次超时。
+    """
 
     def __init__(self, engine_names, options=None):
         options = options or {}
         self.options = options
         self.engines = []
         self.missing = []
+        self.skip_after = max(0, int(options.get("engine_skip_after") or 0))
+        self._fail_streak = {}
+        self._benched = []
 
         for name in engine_names:
             name = (name or "").strip().lower()
@@ -716,6 +876,21 @@ class Router:
     def chain_names(self):
         return [e.name for e in self.engines]
 
+    def benched_names(self):
+        """本轮被熔断跳过的引擎。"""
+        return list(self._benched)
+
+    # -- 熔断计数 ---------------------------------------------------------- #
+    def _note_failure(self, name):
+        streak = self._fail_streak.get(name, 0) + 1
+        self._fail_streak[name] = streak
+        if self.skip_after and streak >= self.skip_after and name not in self._benched:
+            self._benched.append(name)
+        return streak
+
+    def _note_success(self, name):
+        self._fail_streak[name] = 0
+
     def translate(self, text, source="auto", target="zh-CN"):
         """依次尝试各引擎，返回 TranslateResult；全部失败抛 EngineError。"""
         if not self.engines:
@@ -728,19 +903,33 @@ class Router:
 
         errors = []
         for engine in self.engines:
+            if engine.name in self._benched:
+                continue
             try:
                 translated, detected = engine.translate_detailed(text, source, target)
             except EngineError as exc:
+                self._note_failure(engine.name)
                 errors.append("%s: %s" % (engine.name, exc))
                 continue
             except Exception as exc:  # 兜底，绝不让单引擎异常打断整条链
+                self._note_failure(engine.name)
                 errors.append("%s: 意外错误 %s" % (engine.name, exc))
                 continue
 
             if translated is None:
+                self._note_failure(engine.name)
                 errors.append("%s: 返回空译文" % engine.name)
                 continue
 
+            # 引擎「成功」但吐的是退化内容（同一字符反复重复）—— 当作失败降级，
+            # 否则垃圾译文会被原样写进数据库。
+            if translated != text and detect.looks_degenerate(translated):
+                self._note_failure(engine.name)
+                errors.append("%s: 译文退化（字符反复重复），已丢弃: %s"
+                              % (engine.name, brief(translated, 40)))
+                continue
+
+            self._note_success(engine.name)
             result = TranslateResult(
                 text=translated.strip(),
                 engine=engine.name,
@@ -753,7 +942,44 @@ class Router:
                 result.text = text
             return result
 
-        raise EngineError("所有引擎均失败 -> " + " | ".join(errors))
+        raise EngineError(self.failure_message(errors))
+
+    # -- 失败时的完整交代 -------------------------------------------------- #
+    def _proxy_display(self):
+        raw = (self.options.get("http_proxy") or "").strip()
+        if not raw:
+            return "未设置"
+        fixed = normalize_proxy(raw)
+        return "%s（已按 %s 使用）" % (raw, fixed) if fixed != raw else fixed
+
+    def _hint(self, errors):
+        """全部引擎失败时，若失败原因高度雷同就点一句可能的病因。"""
+        if not errors:
+            return ""
+        joined = " ".join(errors)
+        if "Name or service not known" in joined or "getaddrinfo failed" in joined:
+            return ("。提示：所有引擎都解析不了域名，通常是 http_proxy 写错或代理不可达"
+                    "（当前值: %s）" % self._proxy_display())
+        if len(errors) > 1 and all(("网络错误" in e or "请求失败" in e) for e in errors):
+            return ("。提示：全部引擎都是网络错误，请检查 http_proxy 与出网连通性"
+                    "（当前值: %s）" % self._proxy_display())
+        return ""
+
+    def failure_message(self, errors):
+        """把失败原因拼成一条能直接看出问题的日志。
+
+        要交待三件事：谁失败了、为什么、谁根本没上（缺凭证 / 被熔断）。
+        只报「所有引擎均失败 -> edge: ... | google: ...」最容易让人误判。
+        """
+        parts = list(errors)
+        for name in self._benched:
+            parts.append("%s: 本轮已连续失败 %d 次，暂时跳过"
+                         % (name, self._fail_streak.get(name, 0)))
+        for name, keys in self.missing:
+            parts.append("%s: 未配置（需要 %s）" % (name, " / ".join(keys)))
+        if not parts:
+            parts.append("没有可尝试的引擎")
+        return "所有引擎均失败 -> " + " | ".join(parts) + self._hint(errors)
 
     def test_all(self, sample="Hello, this is a translation test."):
         """逐个测试已配置的引擎，返回 [(label, ok, detail, elapsed_ms), ...]。"""

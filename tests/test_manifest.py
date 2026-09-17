@@ -22,6 +22,7 @@ import contextlib
 import importlib.util
 import io
 import os
+import re
 import sys
 import tempfile
 import zipfile
@@ -194,6 +195,17 @@ def main():
                   str(entry.get("version")) == str(manifest.get("version")),
                   "%s vs %s" % (entry.get("version"), manifest.get("version")))
             check("索引元数据含描述", bool((entry.get("metadata") or {}).get("description")))
+
+    # 脚本里自报的版本号也要跟清单一致 —— 曾漂移到 1.0.0 而清单已是 1.1.1，
+    # 结果日志里一直打印旧版本号，排查时容易被带偏。
+    script = os.path.join(ROOT, "src", PLUGIN_ID, PLUGIN_ID + ".py")
+    with open(script, encoding="utf-8") as fh:
+        script_text = fh.read()
+    match = re.search(r'^VERSION\s*=\s*"([^"]+)"', script_text, re.M)
+    check("入口脚本里声明了 VERSION", match is not None)
+    check("脚本 VERSION 与清单一致",
+          match is not None and match.group(1) == str(manifest.get("version")),
+          "%s vs %s" % (match.group(1) if match else "?", manifest.get("version")))
 
     print("\n8) 打包可复现性（Windows 与 Linux 产出同样的 zip）")
     build_mod = load_build_module()
