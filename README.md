@@ -59,33 +59,66 @@ python3 tests/test_pipeline.py
 
 ---
 
-## 环境要求
+## 部署环境
+
+### 环境要求
 
 | 项目 | 要求 |
 | --- | --- |
 | Stash | v0.31.x（在 v0.31.1 上开发与验证） |
 | Python | 3.8+，**只需要标准库**，不需要 `pip install` 任何东西 |
-| Stash 镜像 | 需要有 python3。官方的 `stashapp/stash` **不含 Python**；`nerethos/stash`、`feederbox826/stash-s6` 等社区镜像自带 |
+| 网络 | 看所选引擎：国产云（腾讯 / 阿里 / 百度）与 lingva / mymemory 国内直连即可；google / deepl 需代理 |
+
+### 各部署环境对照
+
+| 环境 | 自带 Python | 本插件 | 说明 |
+| --- | --- | --- | --- |
+| `stashapp/stash`（**官方镜像**） | ✅ 2025-11 起的构建已自带 `python3` | **开箱即用** | Alpine 基础，解释器名就叫 `python3`，与本插件清单的 `exec` 写法一致；镜像预装 `stashapp-tools`、`cloudscraper`、`mechanicalsoup`、`py3-requests` 等社区插件常用包（本插件零依赖，与它们互不影响） |
+| `nerethos/stash` | ✅ 且带 venv | 开箱即用 | venv 解释器：`/pip-install/venv/bin/python3` |
+| `feederbox826/stash-s6` | ✅ uv 管理 | 开箱即用 | 启动时自动扫描插件目录的 `requirements.txt`；本插件没有这个文件，不会触发任何安装 |
+| Windows 原生 | 自行安装 | 填 Python 路径 | 装好 Python 3 后在 Stash 设置里填绝对路径 |
+| QNAP / 群晖等 NAS 自建 venv | 自行创建 | 填 venv 绝对路径 | 见下文「确认 Python 可用」 |
+
+### 确认 Python 可用
+
+```bash
+# 官方镜像 / nerethos / stash-s6 通用：进容器看版本
+docker exec -it stash python3 --version
+
+# nerethos/stash 的 venv
+docker exec -it stash /pip-install/venv/bin/python3 --version
+
+# QNAP 自建 venv 示例（路径按自己的来）
+/share/CACHEDEV1_DATA/Public/stash/py/venv/bin/python3 --version
+```
+
+版本 ≥ 3.8 即可。能在容器里跑通，插件就能跑通——本插件不 import 任何第三方包。
+
+### Python 路径配置
+
+Stash 找不到 Python 时（日志报 `no such file or directory: python3`），到
+**设置 → 系统 → 应用程序路径 → Python 可执行文件路径** 填绝对路径，例如：
+
+| 环境 | 填什么 |
+| --- | --- |
+| 官方镜像 | `python3`（一般在 PATH 里，通常不用填） |
+| nerethos/stash | `/pip-install/venv/bin/python3` |
+| QNAP 自建 venv | `/share/CACHEDEV1_DATA/Public/stash/py/venv/bin/python3` |
+| Windows | `C:\Python312\python.exe`（按实际安装路径） |
+
+改完 **重载插件** 生效。
+
+### 与 Python 环境类插件的关系
+
+| 插件 | 是否需要 | 说明 |
+| --- | --- | --- |
+| [PythonDepManager](https://github.com/stashapp/CommunityScripts/tree/main/plugins/PythonDepManager) | **不需要** | 它通过 `ensure_import("包名==版本")` 给需要第三方包的插件按需装包；本插件只用标准库，没有可装的东西。Stash 也没有原生的「插件前置」机制，装了它对本插件无任何影响、无加载顺序要求 |
+| Python Tools Installer | **不需要** | 给官方镜像下载 `stashapp-tools` 的辅助插件；本插件不使用 `stashapp-tools`，装不装都不影响 |
 
 > **为什么插件是 Python 而不是 JS？**
 > Stash v0.31 的 JS 插件运行时（内嵌 goja 引擎）只暴露 `input`、`log`、`util`、`gql` 四样东西，**没有 HTTP 能力**，无法直接请求翻译接口。所以走 Stash 官方支持的 `interface: raw` 外部进程方式。
 >
 > 另外 Stash v0.31.1 **没有「扫描完成」钩子**（源码里明确标注 scan 相关钩子尚未接入），所以自动翻译挂在实体写入之后——刮削器把数据写库的那一刻即触发，效果等价。
-
-### 确认 Python 可用
-
-```bash
-# 进容器看一下
-docker exec -it stash python3 --version
-```
-
-如果用的是 `nerethos/stash`，镜像里还带了一个装了依赖的 venv，可以用它：
-
-```
-/pip-install/venv/bin/python3
-```
-
-若 Stash 找不到 Python，在 **设置 → 系统 → 应用程序路径 → Python 可执行文件路径** 里填上面这个绝对路径。
 
 ---
 
