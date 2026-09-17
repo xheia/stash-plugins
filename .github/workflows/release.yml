@@ -58,5 +58,8 @@ jobs:
             echo "索引无变化，跳过提交"
           else
             git commit -m "chore: refresh plugin index for v${{ steps.build.outputs.version }}"
-            git push
+            # 注意：打 tag 触发的 run 里 HEAD 是游离状态（detached），
+            # 直接 `git push` 会因为找不到当前分支而 exit 128。
+            # 必须显式指定 refspec，目标分支取仓库默认分支。
+            git push origin "HEAD:${{ github.event.repository.default_branch }}"
           fi
