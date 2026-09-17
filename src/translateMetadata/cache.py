@@ -95,6 +95,21 @@ class TranslationCache:
         except Exception:
             pass
 
+    def delete(self, engine, source, target, text):
+        """删除一条缓存。失败静默（下轮覆盖即可），返回是否删除。"""
+        if not self.enabled or self._conn is None or not text:
+            return False
+        key = self._make_key(engine, source, target, text)
+        try:
+            with self._lock:
+                cursor = self._conn.execute(
+                    "DELETE FROM translations WHERE key = ?", (key,)
+                )
+                self._conn.commit()
+                return cursor.rowcount > 0
+        except Exception:
+            return False
+
     def stats(self):
         return {"hits": self._hits, "misses": self._misses}
 

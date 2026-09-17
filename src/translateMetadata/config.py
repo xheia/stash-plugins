@@ -64,6 +64,16 @@ DEFAULTS = {
     "alibaba_region": "mt.aliyuncs.com",
     "libretranslate_url": "http://localhost:5000",
     "libretranslate_api_key": "",
+    # DeepL / MyMemory / Lingva
+    "deepl_api_key": "",
+    "deepl_api_url": "",
+    "mymemory_email": "",
+    "lingva_instance": "https://lingva.ml",
+    # AI 翻译（OpenAI 兼容）
+    "openai_base_url": "",
+    "openai_api_key": "",
+    "openai_model": "gpt-4o-mini",
+    "openai_prompt": "",
 }
 
 # --------------------------------------------------------------------------- #
@@ -204,6 +214,14 @@ class Settings:
             "alibaba_region": to_str(self._values.get("alibaba_region"), DEFAULTS["alibaba_region"]),
             "libretranslate_url": to_str(self._values.get("libretranslate_url"), "http://localhost:5000"),
             "libretranslate_api_key": to_str(self._values.get("libretranslate_api_key")),
+            "deepl_api_key": to_str(self._values.get("deepl_api_key")),
+            "deepl_api_url": to_str(self._values.get("deepl_api_url")),
+            "mymemory_email": to_str(self._values.get("mymemory_email")),
+            "lingva_instance": to_str(self._values.get("lingva_instance"), "https://lingva.ml"),
+            "openai_base_url": to_str(self._values.get("openai_base_url")),
+            "openai_api_key": to_str(self._values.get("openai_api_key")),
+            "openai_model": to_str(self._values.get("openai_model")),
+            "openai_prompt": to_str(self._values.get("openai_prompt")),
         }
 
     def auto_enabled(self, entity):

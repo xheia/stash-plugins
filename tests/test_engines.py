@@ -516,6 +516,243 @@ check("None 不炸", engines.brief(None) == "")
 
 
 # --------------------------------------------------------------------------- #
+# 17. DeepL 引擎（Free / Pro 档位与响应解析）
+# --------------------------------------------------------------------------- #
+section("17) DeepL 引擎")
+
+import json as _json
+
+_real_http_request = engines.http_request
+_real_json_request = engines.json_request
+
+
+def _stub_http(status, payload):
+    raw = _json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    def fake(url, method="GET", headers=None, data=None, timeout=20, proxy="",
+             retries=0, backoff_ms=800):
+        fake.last_url = url
+        fake.last_headers = dict(headers or {})
+        fake.last_body = (data or b"").decode("utf-8")
+        return status, raw
+
+    return fake
+
+
+def _stub_http_error(message):
+    def fake(*args, **kwargs):
+        raise engines.EngineError(message)
+    return fake
+
+
+deepl = engines.DeepLEngine({"deepl_api_key": "abc123:fx"})
+check("免费档 Key 走 api-free", deepl.api_url.startswith("https://api-free.deepl.com/v2/translate"),
+      deepl.api_url)
+deepl_pro = engines.DeepLEngine({"deepl_api_key": "abc123"})
+check("专业档 Key 走 api.deepl.com", deepl_pro.api_url.startswith("https://api.deepl.com/v2/translate"),
+      deepl_pro.api_url)
+deepl_manual = engines.DeepLEngine({"deepl_api_key": "abc123:fx",
+                                    "deepl_api_url": "https://api.deepl.com/v2"})
+check("显式接口地址优先", deepl_manual.api_url.startswith("https://api.deepl.com/v2/translate"),
+      deepl_manual.api_url)
+check("语言码映射 zh-CN -> ZH", engines.to_engine_lang("deepl", "zh-CN") == "ZH")
+
+engines.http_request = _stub_http(200, {"translations": [
+    {"text": "你好，世界", "detected_source_language": "EN"}]})
+out = deepl.translate_detailed("Hello, world")
+check("DeepL 正常解析", out == ("你好，世界", "EN"), str(out))
+check("DeepL 请求打到 translate 端点", "/v2/translate" in deepl_translate_url if (deepl_translate_url := getattr(engines.http_request, "last_url", "")) else False,
+      str(getattr(engines.http_request, "last_url", "")))
+check("DeepL 表单带 auth_key", "auth_key=abc123%3Afx" in engines.http_request.last_body,
+      engines.http_request.last_body[:120])
+
+engines.http_request = _stub_http(403, {"message": "Wrong key"})
+try:
+    deepl.translate_detailed("hi")
+    check("DeepL 403 应抛错", False)
+except engines.EngineError as exc:
+    check("DeepL 403 提示档位问题", "403" in str(exc) and "api-free" in str(exc), str(exc))
+
+engines.http_request = _stub_http(456, {"message": "Quota exceeded"})
+try:
+    deepl.translate_detailed("hi")
+    check("DeepL 456 应抛错", False)
+except engines.EngineError as exc:
+    check("DeepL 456 提示配额", "配额" in str(exc), str(exc))
+
+engines.http_request = _real_http_request
+
+
+# --------------------------------------------------------------------------- #
+# 18. MyMemory 引擎
+# --------------------------------------------------------------------------- #
+section("18) MyMemory 引擎")
+
+mm = engines.MyMemoryEngine({"mymemory_email": "me@example.com"})
+engines.http_request = _stub_http(200, {"responseData": {"translatedText": "你好"},
+                                        "responseStatus": "200"})
+out = mm.translate_detailed("Hello", "auto", "zh-CN")
+check("MyMemory 正常解析", out == ("你好", None), str(out))
+check("auto 源语言 -> Autodetect", "langpair=Autodetect%7Czh-CN" in engines.http_request.last_url,
+      engines.http_request.last_url)
+check("email 提额参数", "de=me%40example.com" in engines.http_request.last_url,
+      engines.http_request.last_url)
+
+engines.http_request = _stub_http(200, {"responseData": {"translatedText": "你好"},
+                                        "responseStatus": "200"})
+out = engines.MyMemoryEngine({}).translate_detailed("Hello", "en", "zh-CN")
+check("显式源语言 -> en|zh-CN", "langpair=en%7Czh-CN" in engines.http_request.last_url,
+      engines.http_request.last_url)
+
+engines.http_request = _stub_http(200, {"responseData": {
+    "translatedText": "MYMEMORY WARNING: YOU USED ALL AVAILABLE FREE TRANSLATIONS FOR TODAY"},
+    "responseStatus": "200"})
+try:
+    mm.translate_detailed("Hello")
+    check("MyMemory 配额告警应抛错", False)
+except engines.EngineError as exc:
+    check("MyMemory 配额告警被拒绝", "MYMEMORY WARNING" in str(exc), str(exc))
+
+try:
+    engines.MyMemoryEngine({}).translate_detailed("长" * 300)
+    check("MyMemory 超长应抛错", False)
+except engines.EngineError as exc:
+    check("MyMemory 超长上限提示", "500" in str(exc), str(exc))
+
+engines.http_request = _stub_http(403, {"responseDetails": "Invalid langpair",
+                                        "responseStatus": "403"})
+try:
+    mm.translate_detailed("Hello")
+    check("MyMemory 报错应抛错", False)
+except engines.EngineError as exc:
+    check("MyMemory 错误透出详情", "Invalid langpair" in str(exc), str(exc))
+
+engines.http_request = _real_http_request
+
+
+# --------------------------------------------------------------------------- #
+# 19. Lingva 引擎
+# --------------------------------------------------------------------------- #
+section("19) Lingva 引擎")
+
+check("Lingva zh-CN -> zh", engines.to_engine_lang("lingva", "zh-CN") == "zh")
+check("Lingva zh-TW -> zh_HANT", engines.to_engine_lang("lingva", "zh-TW") == "zh_HANT")
+
+lingva = engines.LingvaEngine({})
+check("默认实例 lingva.ml", lingva.base_url == "https://lingva.ml", lingva.base_url)
+lingva2 = engines.LingvaEngine({"lingva_instance": "https://lingva.lunar.icu/"})
+check("结尾斜杠被去掉", lingva2.base_url == "https://lingva.lunar.icu", lingva2.base_url)
+lingva3 = engines.LingvaEngine({"lingva_instance": "https://lingva.ml/api"})
+check("带 /api 后缀被剥离", lingva3.base_url == "https://lingva.ml", lingva3.base_url)
+
+engines.http_request = _stub_http(200, {"translation": "你好世界",
+                                        "info": {"detectedSource": "en"}})
+out = lingva.translate_detailed("Hello world", "auto", "zh-CN")
+check("Lingva 正常解析", out == ("你好世界", "en"), str(out))
+check("Lingva 请求路径正确", "/api/v1/auto/zh/Hello%20world" in engines.http_request.last_url,
+      engines.http_request.last_url)
+
+engines.http_request = _stub_http(200, {"error": "not found"})
+try:
+    lingva.translate_detailed("Hello")
+    check("Lingva 空译文应抛错", False)
+except engines.EngineError as exc:
+    check("Lingva 空译文报错", "未返回译文" in str(exc), str(exc))
+
+engines.http_request = _real_http_request
+
+
+# --------------------------------------------------------------------------- #
+# 20. AI 翻译（OpenAI 兼容）引擎
+# --------------------------------------------------------------------------- #
+section("20) AI 翻译（OpenAI 兼容）引擎")
+
+
+def openai_base(options):
+    return engines.OpenAIEngine(options).base_url
+
+
+check("只填 Key -> OpenAI 官方地址",
+      openai_base({"openai_api_key": "sk-x"}) == "https://api.openai.com/v1",
+      openai_base({"openai_api_key": "sk-x"}))
+check("DeepSeek 域名补 /v1",
+      openai_base({"openai_base_url": "https://api.deepseek.com"}) == "https://api.deepseek.com/v1",
+      openai_base({"openai_base_url": "https://api.deepseek.com"}))
+check("Ollama 补 /v1",
+      openai_base({"openai_base_url": "http://localhost:11434"}) == "http://localhost:11434/v1",
+      openai_base({"openai_base_url": "http://localhost:11434"}))
+check("自定义路径尊重原样",
+      openai_base({"openai_base_url": "https://gw.example.com/api/openai"}) == "https://gw.example.com/api/openai",
+      openai_base({"openai_base_url": "https://gw.example.com/api/openai"}))
+check("/chat/completions 后缀被剥离",
+      openai_base({"openai_base_url": "https://api.deepseek.com/v1/chat/completions"}) == "https://api.deepseek.com/v1",
+      openai_base({"openai_base_url": "https://api.deepseek.com/v1/chat/completions"}))
+check("只填地址（本地服务）即可用", engines.OpenAIEngine({"openai_base_url": "http://localhost:11434"}).available())
+check("只填 Key 即可用", engines.OpenAIEngine({"openai_api_key": "sk-x"}).available())
+check("两者都不填不可用", not engines.OpenAIEngine({}).available())
+check("默认模型 gpt-4o-mini",
+      engines.OpenAIEngine({"openai_api_key": "sk"}).model == "gpt-4o-mini")
+check("自定义模型生效",
+      engines.OpenAIEngine({"openai_api_key": "sk", "openai_model": "deepseek-chat"}).model == "deepseek-chat")
+
+ai = engines.OpenAIEngine({"openai_base_url": "https://api.deepseek.com",
+                           "openai_api_key": "sk-test", "openai_model": "deepseek-chat"})
+captured = {}
+
+
+def _stub_json(url, method="POST", headers=None, payload=None, timeout=20, proxy="",
+               retries=0, backoff_ms=800):
+    captured.update({"url": url, "headers": dict(headers or {}), "payload": payload})
+    return {"choices": [{"message": {"content": "  \"你好世界\"  "}}]}
+
+
+engines.json_request = _stub_json
+out = ai.translate_detailed("Hello world")
+check("AI 正常解析并去引号", out[0] == "你好世界", str(out))
+check("AI 请求打到 chat/completions",
+      captured["url"] == "https://api.deepseek.com/v1/chat/completions", captured["url"])
+check("AI 带模型名", captured["payload"]["model"] == "deepseek-chat")
+check("AI 带 Bearer 头", captured["headers"].get("Authorization") == "Bearer sk-test")
+check("AI 提示词含目标语言", "简体中文" in captured["payload"]["messages"][0]["content"])
+check("AI 用户消息是原文", captured["payload"]["messages"][1]["content"] == "Hello world")
+
+engines.json_request = lambda *a, **k: {"error": {"message": "Incorrect API key"}}
+try:
+    ai.translate_detailed("hi")
+    check("AI 报错应抛错", False)
+except engines.EngineError as exc:
+    check("AI 错误透出 message", "Incorrect API key" in str(exc), str(exc))
+
+engines.json_request = _real_json_request
+
+
+# --------------------------------------------------------------------------- #
+# 21. EDGE 免认证端点（translatetext）
+# --------------------------------------------------------------------------- #
+section("21) EDGE 免认证端点")
+
+edge = engines.EdgeEngine({"timeout_s": 20})
+engines.http_request = _stub_http(200, [
+    {"detectedLanguage": {"language": "en"},
+     "translations": [{"text": "你好，世界", "to": "zh-Hans"}]}])
+out = edge.translate_detailed("Hello, world", "auto", "zh-CN")
+check("EDGE 正常解析", out == ("你好，世界", "en"), str(out))
+check("EDGE 打到免认证端点", "edge.microsoft.com/translate/translatetext" in engines.http_request.last_url,
+      engines.http_request.last_url)
+check("EDGE 带 Origin 伪装头", engines.http_request.last_headers.get("Origin") == "https://www.microsoft.com")
+check("EDGE 不带 Authorization", "Authorization" not in engines.http_request.last_headers)
+
+engines.http_request = _stub_http_error("网络错误: [WinError 10054] 远程主机强迫关闭了一个现有的连接")
+try:
+    edge.translate_detailed("hi")
+    check("EDGE 连接被重置应抛错", False)
+except engines.EngineError as exc:
+    check("EDGE 被重置时给出网络路径提示", "代理" in str(exc) or "重置" in str(exc), str(exc))
+
+engines.http_request = _real_http_request
+
+
+# --------------------------------------------------------------------------- #
 print("\n" + "=" * 60)
 print("通过 %d 项，失败 %d 项" % (len(PASSED), len(FAILED)))
 for name, detail in FAILED:

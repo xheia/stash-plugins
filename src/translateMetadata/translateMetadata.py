@@ -23,7 +23,7 @@ from config import load_settings, cache_path
 from engines import EngineError, Router, normalize_proxy
 from stash_api import StashAPI, StashError
 
-VERSION = "1.1.2"
+VERSION = "1.2.0"
 
 # hook 类型前缀 -> 实体名
 _HOOK_ENTITY = {
@@ -82,12 +82,19 @@ class Translator:
 
         hit = self.cache.get(self.chain_key, source, target, original)
         if hit:
-            self.stats["cached"] += 1
             translated = hit["text"]
-            if translated and translated != original:
+            if translated and translated != original and not detect.looks_degenerate(translated):
+                self.stats["cached"] += 1
                 return translated, hit.get("engine") or self.chain_key
-            self.stats["skipped"] += 1
-            return None, None
+            # 缓存命中退化译文（v1.1.2 之前的老缓存可能是「相相相相…」这类垃圾）——
+            # 删掉这条，落到下面的引擎重新翻译，绝不让缓存成为垃圾译文的重放通道。
+            if translated and detect.looks_degenerate(translated):
+                log.warning("缓存命中退化译文，已删除并重新翻译: %s" % detect.strip_text(translated)[:40])
+                self.cache.delete(self.chain_key, source, target, original)
+            else:
+                # 缓存说「不用翻」（空译文或与原文相同）
+                self.stats["skipped"] += 1
+                return None, None
 
         try:
             result = self.router.translate(original, source, target)

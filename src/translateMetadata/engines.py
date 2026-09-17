@@ -35,15 +35,15 @@ class EngineError(Exception):
 # 各引擎自己的写法在这里翻译。
 # --------------------------------------------------------------------------- #
 LANG_MAP = {
-    "zh-CN": {"edge": "zh-Hans", "google": "zh-CN", "baidu": "zh", "tencent": "zh", "alibaba": "zh", "libretranslate": "zh"},
-    "zh": {"edge": "zh-Hans", "google": "zh-CN", "baidu": "zh", "tencent": "zh", "alibaba": "zh", "libretranslate": "zh"},
-    "zh-Hans": {"edge": "zh-Hans", "google": "zh-CN", "baidu": "zh", "tencent": "zh", "alibaba": "zh", "libretranslate": "zh"},
-    "zh-TW": {"edge": "zh-Hant", "google": "zh-TW", "baidu": "cht", "tencent": "zh-TW", "alibaba": "zh-tw", "libretranslate": "zt"},
-    "zh-Hant": {"edge": "zh-Hant", "google": "zh-TW", "baidu": "cht", "tencent": "zh-TW", "alibaba": "zh-tw", "libretranslate": "zt"},
-    "en": {"edge": "en", "google": "en", "baidu": "en", "tencent": "en", "alibaba": "en", "libretranslate": "en"},
-    "ja": {"edge": "ja", "google": "ja", "baidu": "jp", "tencent": "ja", "alibaba": "ja", "libretranslate": "ja"},
-    "ko": {"edge": "ko", "google": "ko", "baidu": "kor", "tencent": "ko", "alibaba": "ko", "libretranslate": "ko"},
-    "ru": {"edge": "ru", "google": "ru", "baidu": "ru", "tencent": "ru", "alibaba": "ru", "libretranslate": "ru"},
+    "zh-CN": {"edge": "zh-Hans", "google": "zh-CN", "baidu": "zh", "tencent": "zh", "alibaba": "zh", "libretranslate": "zh", "deepl": "ZH", "mymemory": "zh-CN", "lingva": "zh", "openai": "zh-CN"},
+    "zh": {"edge": "zh-Hans", "google": "zh-CN", "baidu": "zh", "tencent": "zh", "alibaba": "zh", "libretranslate": "zh", "deepl": "ZH", "mymemory": "zh-CN", "lingva": "zh", "openai": "zh-CN"},
+    "zh-Hans": {"edge": "zh-Hans", "google": "zh-CN", "baidu": "zh", "tencent": "zh", "alibaba": "zh", "libretranslate": "zh", "deepl": "ZH", "mymemory": "zh-CN", "lingva": "zh", "openai": "zh-CN"},
+    "zh-TW": {"edge": "zh-Hant", "google": "zh-TW", "baidu": "cht", "tencent": "zh-TW", "alibaba": "zh-tw", "libretranslate": "zt", "deepl": "ZH", "mymemory": "zh-TW", "lingva": "zh_HANT", "openai": "zh-TW"},
+    "zh-Hant": {"edge": "zh-Hant", "google": "zh-TW", "baidu": "cht", "tencent": "zh-TW", "alibaba": "zh-tw", "libretranslate": "zt", "deepl": "ZH", "mymemory": "zh-TW", "lingva": "zh_HANT", "openai": "zh-TW"},
+    "en": {"edge": "en", "google": "en", "baidu": "en", "tencent": "en", "alibaba": "en", "libretranslate": "en", "deepl": "EN", "mymemory": "en", "lingva": "en", "openai": "en"},
+    "ja": {"edge": "ja", "google": "ja", "baidu": "jp", "tencent": "ja", "alibaba": "ja", "libretranslate": "ja", "deepl": "JA", "mymemory": "ja", "lingva": "ja", "openai": "ja"},
+    "ko": {"edge": "ko", "google": "ko", "baidu": "kor", "tencent": "ko", "alibaba": "ko", "libretranslate": "ko", "deepl": "KO", "mymemory": "ko", "lingva": "ko", "openai": "ko"},
+    "ru": {"edge": "ru", "google": "ru", "baidu": "ru", "tencent": "ru", "alibaba": "ru", "libretranslate": "ru", "deepl": "RU", "mymemory": "ru", "lingva": "ru", "openai": "ru"},
 }
 
 # 引擎返回的语言里，哪些算「中文」——用于丢弃「其实原文就是中文」的翻译结果
@@ -270,55 +270,28 @@ class BaseEngine:
 
 # --------------------------------------------------------------------------- #
 # 1. EDGE —— 微软 Edge 浏览器内置翻译接口（免费、无需 Key）
-#    GET  https://edge.microsoft.com/translate/auth        取短期 JWT
-#    POST https://api-edge.cognitive.microsofttranslator.com/translate
+#    POST https://edge.microsoft.com/translate/translatetext?from=en&to=zh-CHS&api-version=3.0
+#    免认证，靠 Origin/Referer 伪装微软官网。
 #
-#    ⚠️ 2026-09 实测：**这个免费接口已被微软下线**，客户端无法修复。
-#       证据（两条独立网络路径都复现）：
-#         * GET auth 端点 -> HTTP 404，证书签发者是 Microsoft TLS G2 RSA CA、DNS 指向
-#           微软真实 IP（非劫持），响应头 X-Falcon-RouterStatusCode: SuccessfullyForwarded (404)
-#           —— 即请求确实到了微软后端，后端说这条路径不存在
-#         * 不带 token 直接 POST translate 端点 -> 401 credentials are missing or invalid
-#       也就是说没有可补的密钥、也没有可开的开关。实现保留在这里，仅备微软恢复。
+#    ⚠️ 2026-09 实测两条路径：
+#       * 免 token 旧端点（api-edge.cognitive.microsofttranslator.com）需先取 JWT，
+#         而 edge.microsoft.com/translate/auth 已下线（404）；
+#       * 免认证 translatetext 端点真实存在，但在大陆网络下直连被 RST、
+#         本机代理同样握手失败。是否可用完全取决于部署机的网络路径
+#         —— Stash 在 NAS 上时，请用「测试翻译引擎」任务实测。
+#       因此该引擎不进默认链，仍保留手动选择。
 # --------------------------------------------------------------------------- #
 class EdgeEngine(BaseEngine):
     name = "edge"
-    AUTH_URL = "https://edge.microsoft.com/translate/auth"
-    API_URL = "https://api-edge.cognitive.microsofttranslator.com/translate"
+    API_URL = "https://edge.microsoft.com/translate/translatetext"
     UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
           "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0")
-    OFFLINE_REASON = (
-        "微软已下线 Edge 浏览器的免费翻译令牌接口（edge.microsoft.com/translate/auth 返回 404），"
-        "此引擎当前不可用且客户端无法修复。请改用 google / 腾讯云 / 阿里云 / LibreTranslate。"
+    BLOCKED_HINT = (
+        "edge.microsoft.com 免认证端点连接失败：大陆网络下该域名常被重置，"
+        "需要代理且代理规则不得把微软域名放直连；请用其它引擎或调整代理规则。"
     )
 
-    def __init__(self, options=None):
-        super().__init__(options)
-        self._token = None
-        self._token_at = 0.0
-
-    def _get_token(self):
-        # token 有效期约 10 分钟，留 60 秒余量
-        if self._token and (time.time() - self._token_at) < 540:
-            return self._token
-        self._throttle()
-        status, raw = http_request(
-            self.AUTH_URL,
-            headers={"User-Agent": self.UA, "Accept": "*/*"},
-            timeout=self.timeout,
-            proxy=self.proxy,
-        )
-        token = raw.decode("utf-8", "replace").strip()
-        if status == 404:
-            raise EngineError("EDGE 取 token 失败 (HTTP 404)：%s" % self.OFFLINE_REASON)
-        if status != 200 or not token or len(token) < 20:
-            raise EngineError("EDGE 取 token 失败 (HTTP %s): %s" % (status, brief(token)))
-        self._token = token
-        self._token_at = time.time()
-        return token
-
     def translate_detailed(self, text, source="auto", target="zh-CN"):
-        token = self._get_token()
         params = {"api-version": "3.0", "to": self.lang(target)}
         if source and source != "auto":
             params["from"] = self.lang(source)
@@ -328,12 +301,13 @@ class EdgeEngine(BaseEngine):
             url,
             method="POST",
             headers={
-                "Authorization": "Bearer " + token,
                 "Content-Type": "application/json",
                 "User-Agent": self.UA,
+                "Origin": "https://www.microsoft.com",
+                "Referer": "https://www.microsoft.com/",
                 "Accept": "*/*",
             },
-            payload=[{"Text": text}],
+            payload=[text],
         )
         try:
             item = data[0] if isinstance(data, list) else data
@@ -345,6 +319,16 @@ class EdgeEngine(BaseEngine):
         dl = (item or {}).get("detectedLanguage") or {}
         detected = dl.get("language")
         return translated, detected
+
+    # 免认证端点的连接失败要带上可读提示，而不是干巴巴的 "Connection reset"
+    def _request(self, url, method="POST", headers=None, payload=None, form=None):
+        try:
+            return super()._request(url, method, headers, payload, form)
+        except EngineError as exc:
+            message = str(exc)
+            if "10054" in message or "reset" in message.lower() or "EOF" in message:
+                raise EngineError("%s（底层错误：%s）" % (self.BLOCKED_HINT, message)) from exc
+            raise
 
 
 # --------------------------------------------------------------------------- #
@@ -802,6 +786,279 @@ class LibreTranslateEngine(BaseEngine):
 
 
 # --------------------------------------------------------------------------- #
+# 7. DeepL API Free —— 免费档每月 50 万字符，需在 deepl.com 注册免费 Key
+#    （Key 以 ":fx" 结尾的是 Free 档，走 api-free.deepl.com；Pro Key 走 api.deepl.com）
+# --------------------------------------------------------------------------- #
+class DeepLEngine(BaseEngine):
+    name = "deepl"
+    DEFAULT_URL = "https://api-free.deepl.com/v2"
+
+    def __init__(self, options=None):
+        super().__init__(options)
+        options = options or {}
+        self.auth_key = (options.get("deepl_api_key") or "").strip()
+        # 按官方规则自动识别：":fx" 结尾的 Key 属于免费档
+        base = (options.get("deepl_api_url") or "").strip().rstrip("/")
+        if not base:
+            base = self.DEFAULT_URL if self.auth_key.endswith(":fx") else "https://api.deepl.com/v2"
+        self.api_url = base + "/translate"
+
+    def available(self):
+        return bool(self.auth_key)
+
+    def requires_credentials(self):
+        return ["deepl_api_key"]
+
+    def translate_detailed(self, text, source="auto", target="zh-CN"):
+        if not self.available():
+            raise EngineError("DeepL 未配置 API Key（deepl.com 免费注册，Key 以 :fx 结尾）")
+
+        form = {
+            "auth_key": self.auth_key,
+            "text": text,
+            # DeepL 的简体中文目标码就是 ZH（繁体暂不支持，会落到简体）
+            "target_lang": self.lang(target),
+        }
+        if source and source != "auto":
+            form["source_lang"] = self.lang(source)
+
+        self._throttle()
+        status, raw = http_request(
+            self.api_url,
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            data=urllib.parse.urlencode(form).encode("utf-8"),
+            timeout=self.timeout,
+            proxy=self.proxy,
+            retries=self.retries,
+            backoff_ms=self.backoff_ms,
+        )
+        try:
+            data = json.loads(raw.decode("utf-8", "replace"))
+        except ValueError as exc:
+            raise EngineError("DeepL 响应不是 JSON: %s" % (raw[:200],)) from exc
+
+        if status == 403:
+            raise EngineError("DeepL 认证失败 (HTTP 403)：Key 无效或填错档位"
+                              "（免费 Key 必须走 api-free.deepl.com）")
+        if status == 456:
+            raise EngineError("DeepL 配额已用完 (HTTP 456)：本月免费额度耗尽，"
+                              "下月恢复或改用其它引擎")
+        if status != 200:
+            raise EngineError("DeepL HTTP %s: %s" % (status, data.get("message") or brief(raw.decode("utf-8", "replace"))))
+
+        translations = data.get("translations") or []
+        if not translations or not translations[0].get("text"):
+            raise EngineError("DeepL 未返回译文: %s" % (json.dumps(data, ensure_ascii=False)[:200],))
+        return translations[0]["text"], translations[0].get("detected_source_language")
+
+
+# --------------------------------------------------------------------------- #
+# 8. MyMemory —— 匿名免费（约 1000 词/天/IP），无需任何注册
+#    填 mymemory_email（任意邮箱）可提升到约 5 万词/天。
+#    限制：单次请求原文不超过 500 字节，超长文本请交给其它引擎。
+# --------------------------------------------------------------------------- #
+class MyMemoryEngine(BaseEngine):
+    name = "mymemory"
+    API_URL = "https://api.mymemory.translated.net/get"
+
+    def __init__(self, options=None):
+        super().__init__(options)
+        options = options or {}
+        self.email = (options.get("mymemory_email") or "").strip()
+
+    def translate_detailed(self, text, source="auto", target="zh-CN"):
+        if len(text.encode("utf-8")) > 500:
+            raise EngineError("原文超过 MyMemory 单次 500 字节上限，请换其它引擎")
+
+        params = {
+            "q": text,
+            # MyMemory 接受 Autodetect 作为源语言
+            "langpair": "%s|%s" % (
+                self.lang(source) if source and source != "auto" else "Autodetect",
+                self.lang(target),
+            ),
+        }
+        if self.email:
+            params["de"] = self.email
+
+        url = self.API_URL + "?" + urllib.parse.urlencode(params)
+        self._throttle()
+        status, raw = http_request(
+            url,
+            headers={"Accept": "application/json"},
+            timeout=self.timeout,
+            proxy=self.proxy,
+            retries=self.retries,
+            backoff_ms=self.backoff_ms,
+        )
+        try:
+            data = json.loads(raw.decode("utf-8", "replace"))
+        except ValueError as exc:
+            raise EngineError("MyMemory 响应不是 JSON: %s" % (raw[:200],)) from exc
+
+        detail = str(data.get("responseDetails") or "")
+        status_code = str(data.get("responseStatus") or "")
+        if status_code not in ("200", "200 ") and status_code.strip() != "200":
+            raise EngineError("MyMemory 报错 %s: %s" % (status_code, detail or data))
+        translated = (data.get("responseData") or {}).get("translatedText")
+        # 拒绝 MyMemory 塞在译文位置的配额告警文本
+        if not translated or "MYMEMORY WARNING" in translated.upper() \
+                or "QUERY LENGTH LIMIT" in translated.upper():
+            raise EngineError("MyMemory 未返回有效译文: %s" % (translated or detail or data))
+        return translated, None
+
+
+# --------------------------------------------------------------------------- #
+# 9. Lingva —— Google 翻译的开源前端镜像，无需 Key、无需代理即可直连
+#    （lingva.ml 由 Cloudflare 托管；不可用时可在设置里换社区实例）
+# --------------------------------------------------------------------------- #
+class LingvaEngine(BaseEngine):
+    name = "lingva"
+
+    def __init__(self, options=None):
+        super().__init__(options)
+        options = options or {}
+        base = (options.get("lingva_instance") or "https://lingva.ml").strip().rstrip("/")
+        if base.endswith("/api"):
+            base = base[: -len("/api")]
+        self.base_url = base
+
+    def translate_detailed(self, text, source="auto", target="zh-CN"):
+        source_lang = self.lang(source) if source and source != "auto" else "auto"
+        url = "%s/api/v1/%s/%s/%s" % (
+            self.base_url, source_lang, self.lang(target), urllib.parse.quote(text, safe=""),
+        )
+        self._throttle()
+        status, raw = http_request(
+            url,
+            headers={"Accept": "application/json"},
+            timeout=self.timeout,
+            proxy=self.proxy,
+            retries=self.retries,
+            backoff_ms=self.backoff_ms,
+        )
+        try:
+            data = json.loads(raw.decode("utf-8", "replace"))
+        except ValueError as exc:
+            raise EngineError("Lingva 响应不是 JSON: %s" % (raw[:200],)) from exc
+
+        translated = data.get("translation")
+        if not translated:
+            raise EngineError("Lingva 未返回译文: %s" % (json.dumps(data, ensure_ascii=False)[:200],))
+        info = data.get("info") or {}
+        return translated, info.get("detectedSource")
+
+
+# --------------------------------------------------------------------------- #
+# 10. AI 翻译（OpenAI 兼容接口）—— 一个配置通吃所有兼容端点：
+#     OpenAI / DeepSeek / 智谱 / Kimi / 通义 / OpenRouter / Ollama / LM Studio ...
+#     只要把「接口地址 + API Key + 模型名」填对即可。LLM 翻译质量通常
+#     远好于传统机翻，且能理解上下文、保留专有名词。
+# --------------------------------------------------------------------------- #
+class OpenAIEngine(BaseEngine):
+    name = "openai"
+    DEFAULT_BASE = "https://api.openai.com/v1"
+    DEFAULT_MODEL = "gpt-4o-mini"
+
+    # 提示词里的目标语言名称（比语言代码更不容易被模型理解错）
+    LANG_PROMPT = {
+        "zh-CN": "简体中文", "zh": "简体中文", "zh-Hans": "简体中文",
+        "zh-TW": "繁体中文（台湾用语）", "zh-Hant": "繁体中文（台湾用语）",
+        "en": "English", "ja": "日本語", "ko": "한국어", "ru": "Русский",
+    }
+
+    DEFAULT_PROMPT = (
+        "You are a professional subtitle/metadata translator. "
+        "Translate the user's text into {lang}. Requirements:\n"
+        "1. Return ONLY the translation, with no explanations, no quotes, no prefix.\n"
+        "2. Keep numbers, version markers (e.g. #456), URLs and file extensions unchanged.\n"
+        "3. Person names may stay in Latin letters if translating them looks awkward.\n"
+        "4. Match the tone of the original (colloquial stays colloquial)."
+    )
+
+    def __init__(self, options=None):
+        super().__init__(options)
+        options = options or {}
+        base = (options.get("openai_base_url") or "").strip().strip("\"'").strip()
+        # 记录用户到底配没配（available 判断要用；base_url 本身永远有值便于容错）
+        self._has_base = bool(base)
+        # 容错：用户可能直接填到 /chat/completions，或者不带 /v1
+        if base.endswith("/chat/completions"):
+            base = base[: -len("/chat/completions")]
+        base = base.rstrip("/")
+        # 路径为空（如 https://api.deepseek.com 或 http://localhost:11434）补 /v1；
+        # 用户自定义了路径（如 https://gw.example.com/api/openai）则尊重原样。
+        if not base:
+            base = self.DEFAULT_BASE
+        elif urllib.parse.urlsplit(base).path.strip("/") == "":
+            base = base + "/v1"
+        self.base_url = base
+        self.api_key = (options.get("openai_api_key") or "").strip()
+        self.model = (options.get("openai_model") or "").strip() or self.DEFAULT_MODEL
+        self.custom_prompt = (options.get("openai_prompt") or "").strip()
+
+    def available(self):
+        # Ollama / LM Studio 这类本地端点不需要 Key，填了地址即可用
+        return self._has_base or bool(self.api_key)
+
+    def requires_credentials(self):
+        return ["openai_base_url（或 openai_api_key）"]
+
+    def _system_prompt(self, target):
+        if self.custom_prompt:
+            return self.custom_prompt
+        lang = self.LANG_PROMPT.get(self.lang(target), self.lang(target))
+        return self.DEFAULT_PROMPT.format(lang=lang)
+
+    def translate_detailed(self, text, source="auto", target="zh-CN"):
+        if not self.available():
+            raise EngineError("AI 翻译未配置：请填接口地址（openai_base_url）或 API Key（openai_api_key）")
+
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = "Bearer " + self.api_key
+
+        payload = {
+            "model": self.model,
+            "temperature": 0.2,
+            "stream": False,
+            "messages": [
+                {"role": "system", "content": self._system_prompt(target)},
+                {"role": "user", "content": text},
+            ],
+        }
+
+        self._throttle()
+        # LLM 比传统机翻慢得多（本地模型尤甚），超时下限放到 60 秒
+        data = json_request(
+            self.base_url + "/chat/completions",
+            method="POST",
+            headers=headers,
+            payload=payload,
+            timeout=max(self.timeout, 60),
+            proxy=self.proxy,
+            retries=self.retries,
+            backoff_ms=self.backoff_ms,
+        )
+
+        if data.get("error"):
+            err = data["error"]
+            raise EngineError("AI 翻译报错: %s" % (
+                err.get("message") if isinstance(err, dict) else err))
+        choices = data.get("choices") or []
+        if not choices:
+            raise EngineError("AI 翻译未返回结果: %s" % (json.dumps(data, ensure_ascii=False)[:200],))
+        content = ((choices[0].get("message") or {}).get("content") or "").strip()
+        # 有些模型喜欢给译文套引号，去掉一层对称引号
+        if len(content) >= 2 and content[0] in "\"'" and content[0] == content[-1]:
+            content = content[1:-1].strip()
+        if not content:
+            raise EngineError("AI 翻译返回了空内容")
+        return content, None
+
+
+# --------------------------------------------------------------------------- #
 # 引擎注册表
 # --------------------------------------------------------------------------- #
 ENGINE_CLASSES = {
@@ -811,19 +1068,27 @@ ENGINE_CLASSES = {
     TencentEngine.name: TencentEngine,
     AlibabaEngine.name: AlibabaEngine,
     LibreTranslateEngine.name: LibreTranslateEngine,
+    DeepLEngine.name: DeepLEngine,
+    MyMemoryEngine.name: MyMemoryEngine,
+    LingvaEngine.name: LingvaEngine,
+    OpenAIEngine.name: OpenAIEngine,
 }
 
 ENGINE_LABELS = {
-    "edge": "EDGE（免费，微软已下线）",
+    "edge": "EDGE（免认证，大陆网络需代理）",
     "google": "Google（免费）",
     "baidu": "百度翻译",
     "tencent": "腾讯云 TMT",
     "alibaba": "阿里云机器翻译",
     "libretranslate": "LibreTranslate",
+    "deepl": "DeepL（免费档，需 API Key）",
+    "mymemory": "MyMemory（匿名免费）",
+    "lingva": "Lingva（Google 免费镜像）",
+    "openai": "AI 翻译（OpenAI 兼容）",
 }
 
-# 默认链只留 Google —— 它是唯一还活着且不需要凭证的引擎。
-# EDGE 已于 2026-09 被微软下线，仍可手动选，但不再放在默认链里浪费请求。
+# 默认链只留 Google —— 它不需要凭证、大陆网络下走代理即可用。
+# EDGE 免认证端点在大陆网络下常被重置（是否可用取决于部署机网络路径），不进默认链。
 DEFAULT_CHAIN = ["google"]
 
 

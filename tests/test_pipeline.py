@@ -395,6 +395,35 @@ def main():
           "calls %d -> %d" % (calls_before, engine.calls))
     check("缓存命中被统计", "命中缓存" in (result.get("output") or ""), str(result))
 
+    print("\n8b) 缓存里的退化译文：命中即删除并重新翻译")
+    # 复现 v1.1.2 之前的问题：老版本把「相相相相…」写进了缓存，
+    # 升级后缓存命中会把垃圾原样回放。现在必须删条目、重新调引擎。
+    run_plugin(state, port, {"mode": "clearcache"})
+    state.db["scene"][0]["title"] = "Beautiful Nurse"
+    state.db["scene"][0]["details"] = "A story about a nurse."
+    state.db["scene"][0]["custom_fields"] = {}
+    poisoned = cache_mod.TranslationCache(cache_file, True)
+    poisoned.put("edge", "auto", "zh-CN", "Beautiful Nurse", "相" * 40, "en")
+    poisoned.close()
+    check("退化缓存条目已就位", True)
+
+    calls_before = engine.calls
+    code, result, _ = run_plugin(state, port, {"mode": "scene"})
+    # 标题命中退化缓存重翻 +1；简介无缓存条目也要翻 +1
+    check("命中退化缓存后重新调用了引擎", engine.calls == calls_before + 2,
+          "calls %d -> %d" % (calls_before, engine.calls))
+    check("标题没有被垃圾回放污染",
+          "相相" not in state.db["scene"][0]["title"],
+          state.db["scene"][0]["title"])
+    check("标题写入了正常译文",
+          state.db["scene"][0]["title"].startswith("译文"),
+          state.db["scene"][0]["title"])
+    reopened = cache_mod.TranslationCache(cache_file, True)
+    row = reopened.get("edge", "auto", "zh-CN", "Beautiful Nurse")
+    reopened.close()
+    check("退化缓存条目已被删除", row is None or "相相" not in (row.get("text") or ""),
+          str(row))
+
     print("\n9) 回滚：还原原文并清理标记")
     state.db["scene"][0]["title"] = "译文1"
     state.db["scene"][0]["details"] = "译文2"

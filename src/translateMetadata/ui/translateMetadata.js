@@ -119,8 +119,14 @@
             return;
           }
           toast.success(
-            "已翻译 " + result.count + " 个字段，刷新页面即可看到：" + result.result
+            "已翻译 " + result.count + " 个字段，页面即将刷新：" + result.result
           );
+          // 服务端写库后 Stash 前端（Apollo 缓存）不会自己重新拉数据，
+          // 整页刷新是唯一能保证详情页重新读取的可靠方式。
+          // 延迟一下让 toast 先展示出来。
+          setTimeout(function () {
+            window.location.reload();
+          }, 1200);
         })
         .catch(function (err) {
           toast.error(err);

@@ -4,7 +4,7 @@
 
 ## Metadata Translator
 
-把 Stash 里的**标题与简介**自动翻译成中文。支持 **腾讯云、阿里云、百度、LibreTranslate、Google** 五种可用引擎（外加已下线但保留实现的 EDGE），可配置优先级与失败自动回退。
+把 Stash 里的**标题与简介**自动翻译成中文。支持 **AI 翻译（OpenAI 兼容，可接 DeepSeek / Ollama / 智谱等）、Google、DeepL、腾讯云、阿里云、百度、Lingva、MyMemory、LibreTranslate、EDGE 免认证接口** 十种引擎，可配置优先级与失败自动回退。
 
 覆盖四个实体：
 
@@ -30,7 +30,7 @@
 ├── src/translateMetadata/          插件源码（就是会被安装的内容）
 │   ├── translateMetadata.yml       插件清单：钩子 / 任务 / 设置项声明
 │   ├── translateMetadata.py        入口：stdin 分发钩子与任务
-│   ├── engines.py                  六个翻译引擎 + 优先级回退路由（含熔断与失败诊断）
+│   ├── engines.py                  十个翻译引擎 + 优先级回退路由（含熔断与失败诊断）
 │   ├── detect.py                   中 / 日 / 韩文语言判定 + 退化译文识别
 │   ├── cache.py                    SQLite 翻译缓存
 │   ├── config.py                   插件设置读取与类型规范化
@@ -137,31 +137,33 @@ python3 build.py --check    # 只预览会打包哪些文件
 
 | 引擎 | 需要凭证 | 免费额度 | 国内直连 | 中文质量 |
 | --- | --- | --- | --- | --- |
+| `openai` | 接口地址（本地可不填 Key） | 取决于所用服务 | DeepSeek / 智谱 / Ollama 通 | **最好**（LLM，能理解上下文） |
 | `tencent` | SecretId + SecretKey | 每月 500 万字符（新用户试用额度，以官网为准） | 通 | 好 |
 | `alibaba` | AccessKeyId + AccessKeySecret | 通用版每月 100 万字符（新用户试用额度，以官网为准） | 通 | 好 |
 | `baidu` | AppID + 密钥 | 标准版 5 万字符/月 | 通 | 好 |
+| `deepl` | API Key（免费档以 `:fx` 结尾） | 每月 50 万字符 | **不通**（需代理） | 好 |
 | `libretranslate` | 视实例而定 | 取决于自托管 | 通 | **一般**（可能吐出退化内容，见下） |
 | `google` | 不需要 | 无明确限制 | **不通**（需代理） | 好 |
-| `edge` | ~~不需要~~ | — | — | ❌ **已被微软下线，不可用** |
+| `lingva` | 不需要 | 无明确限制 | 通（社区实例） | 好（Google 同源） |
+| `mymemory` | 不需要（可填邮箱提额） | 匿名约 1000 词/天；填邮箱约 5 万词/天 | 通 | 一般；单次上限 500 字节 |
+| `edge` | 不需要 | — | **常被重置** | 好（微软同源） |
 
-> ### ⚠️ EDGE 引擎已失效（2026-09）
+> ### EDGE 免认证端点（2026-09 复核）
 >
-> 微软下线了为 Edge 浏览器翻译提供的免费令牌接口，`https://edge.microsoft.com/translate/auth`
-> 现在返回 404。这是**服务端下线**，客户端没有可补的密钥、也没有可开的开关。
+> 早先版本用的「先取 JWT 再翻译」两步接口已被微软下线（`/translate/auth` 返回 404）。
+> 现改用社区实测仍存活的**免认证单步端点**：
 >
-> 实测证据（两条独立网络路径都复现，可自查）：
-> ```bash
-> curl -sS -o /dev/null -w '%{http_code}\n' https://edge.microsoft.com/translate/auth
-> # -> 404
 > ```
-> 该域名解析到微软真实 IP、TLS 证书由 Microsoft TLS G2 RSA CA 签发（不是劫持），
-> 响应头带 `X-Falcon-RouterStatusCode: SuccessfullyForwarded (404)` ——
-> 请求确实到了微软后端，后端说这条路径不存在。不带 token 直接打翻译端点则是 401。
+> POST https://edge.microsoft.com/translate/translatetext?from=en&to=zh-CHS&api-version=3.0
+> Origin: https://www.microsoft.com
+> Referer:  https://www.microsoft.com/
+> ```
 >
-> 代码里仍保留 `edge` 引擎实现，万一微软恢复可直接用；但它已不在默认链里，
-> 日志会明确写出下线的结论，而不会让你以为是自己的配置问题。
+> 无需任何 token。但在大陆网络下该域名**直连常被 RST**，能否使用完全取决于部署机的
+> 代理路径（Clash 类工具若把微软域名放直连规则，同样会失败）。装好后跑一次
+> 「测试翻译引擎」即可确认。不通就换 `google` / `lingva` / `openai`。
 
-> **国内直连环境下，目前真正可用的是腾讯云 / 阿里云 / 百度 / 自托管 LibreTranslate。**
+> **国内直连环境下真正免注册可用的是 `lingva` / `mymemory`**，配 `openai`（接 DeepSeek / 智谱等国产 API）质量最好。
 > Google 的免费端点 `translate.googleapis.com` 在国内不通，且对出口 IP 限流很凶（HTTP 429）。
 > 有代理的话把地址填进 `http_proxy`。
 >
@@ -173,18 +175,30 @@ python3 build.py --check    # 只预览会打包哪些文件
 >
 > ⚠️ LibreTranslate 的译文质量明显弱于云厂商，遇到人名串时可能吐出
 > 「相相相相相相相相…」这类退化内容。插件会**丢弃**这种译文并降级到下一个引擎
-> （实测已拦截），但更根本的办法是别把它放在链首。
+> （实测已拦截；缓存里的退化译文 1.2.0 起也会被自动识别、删除并重翻），
+> 但更根本的办法是别把它放在链首。
 
 ### 推荐配置
 
-**国内直连（推荐）** → 主引擎 `tencent`，回退 `alibaba,libretranslate`
+**有 AI API（质量首选）** → 主引擎 `openai`，回退云厂商
+
+```
+engine:          openai
+engine_fallback: tencent,lingva
+openai_base_url: https://api.deepseek.com        # 或 Ollama http://localhost:11434
+openai_api_key:  sk-xxx                          # Ollama / LM Studio 留空
+openai_model:    deepseek-chat                   # 或 glm-4-flash / qwen2.5:7b 等
+timeout_s:       120                             # LLM 比机翻慢，超时给够
+```
+
+LLM 翻译对这类内容优势明显：能理解上下文、保留 `#456` 这类编号、人名处理更自然。
+
+**国内直连（无 AI）** → 主引擎 `tencent`，回退 `alibaba,lingva`
 
 ```
 engine:          tencent
-engine_fallback: alibaba,libretranslate
+engine_fallback: alibaba,lingva
 ```
-
-腾讯云与阿里云都是每月百万字符级的试用额度，质量稳定、国内直连。两者交替回退可以互相兜底。
 
 **有代理** → 主引擎 `google`，回退 `tencent,alibaba`
 
@@ -192,6 +206,13 @@ engine_fallback: alibaba,libretranslate
 engine:          google
 engine_fallback: tencent,alibaba
 http_proxy:      http://192.168.3.2:7890
+```
+
+**完全零成本** → 主引擎 `lingva`，回退 `mymemory,google`
+
+```
+engine:          lingva
+engine_fallback: mymemory,google
 ```
 
 **只有自托管 LibreTranslate（零成本）** → 主引擎 `libretranslate`，回退留空
@@ -330,7 +351,7 @@ libretranslate_url: http://192.168.3.96:5353
 
 ### 页面按钮
 
-顶部导航栏会出现一个「译」图标：打开某个场景 / 演员 / 工作室 / 标签的详情页，点它即可翻译当前这个实体，结果显示在右下角提示里，刷新页面即可看到效果。
+顶部导航栏会出现一个「译」图标：打开某个场景 / 演员 / 工作室 / 标签的详情页，点它即可翻译当前这个实体，结果显示在右下角提示里，**翻译完成后页面会自动刷新**，无需手动重载。
 
 旁边的列表图标直接跳到任务页。
 
@@ -413,7 +434,12 @@ LibreTranslate 对人名串会这样。1.1.2 起插件会判定为退化输出�
 | 阿里云 `NotSupported` / 语言不支持 | 目标语言码不在该账号可用列表 | 换 `target_lang`（如 `zh-CN` → `zh-TW`） |
 | 百度 `52003: UNAUTHORIZED USER` | AppID 无效 | 核对 `baidu_appid`，确认已开通「通用文本翻译」 |
 | Google `HTTP 429` | 出口 IP 被限流 | 换引擎，或把 `rate_limit_ms` 调大；免费端点对共享 IP 限制很凶 |
-| EDGE `HTTP 404` | 微软已下线该免费接口 | 无解，换引擎。见上文「EDGE 引擎已失效」 |
+| EDGE 连接被重置 / `10054` / `Connection reset` | 大陆网络下 `edge.microsoft.com` 常被重置 | 换 `google` / `lingva` / `openai`，或调整代理规则让该域名走代理 |
+| DeepL `HTTP 403` | Key 无效或档位填错 | 免费 Key（`:fx` 结尾）必须走 `api-free.deepl.com`；地址留空即自动选择 |
+| DeepL `HTTP 456` | 本月免费额度耗尽 | 下月恢复，或改用其它引擎 |
+| MyMemory `MYMEMORY WARNING` | 当日免费额度用尽 | 填 `mymemory_email` 提额到约 5 万词/天，或换引擎 |
+| AI 翻译 `Incorrect API key` / 401 | Key 不对或服务不匹配 | 核对 `openai_api_key`；注意模型名要与所用服务匹配（DeepSeek 没有 `gpt-*`） |
+| AI 翻译 `ModuleNotFoundError` / 404 | 接口地址不对 | 确认 `openai_base_url` 是否为该服务的 OpenAI 兼容端点；Ollama 需 `Ollama serve` 且已 `ollama pull` 模型 |
 
 > 注意报错顺序：阿里云会先校验 AccessKey 再校验签名，所以 AK 有问题时不会出现
 > `SignatureDoesNotMatch`。换句话说，看到 `InvalidAccessKeyId.*` 时无法据此判断签名是否正确。
