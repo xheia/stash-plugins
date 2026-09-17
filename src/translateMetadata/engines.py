@@ -910,11 +910,18 @@ class MyMemoryEngine(BaseEngine):
 
 
 # --------------------------------------------------------------------------- #
-# 9. Lingva —— Google 翻译的开源前端镜像，无需 Key、无需代理即可直连
-#    （lingva.ml 由 Cloudflare 托管；不可用时可在设置里换社区实例）
+# 9. Lingva —— Google 翻译的开源前端镜像，无需 Key
+#    ⚠️ 2026-09 实测：所有公共实例基本已死（本机与部署机两侧验证）——
+#       lingva.ml / translate.plausibility.cloud 被 Cloudflare 盾拦截（403 Just a moment），
+#       lingva.lunar.icu / lingva.esmailelbob.xyz 404，lingva.garudalinux.org 时通时不通。
+#       引擎实现保留：自托管（docker run ghcr.io/tadashi-aikawa/lingva 之类镜像）
+#       或临时可用的社区实例仍可在 lingva_instance 里指定。链里放 lingva 时，
+#       公共实例失败会由熔断机制跳过，不会拖慢整体。
 # --------------------------------------------------------------------------- #
 class LingvaEngine(BaseEngine):
     name = "lingva"
+    UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 
     def __init__(self, options=None):
         super().__init__(options)
@@ -932,16 +939,23 @@ class LingvaEngine(BaseEngine):
         self._throttle()
         status, raw = http_request(
             url,
-            headers={"Accept": "application/json"},
+            headers={"Accept": "application/json", "User-Agent": self.UA},
             timeout=self.timeout,
             proxy=self.proxy,
             retries=self.retries,
             backoff_ms=self.backoff_ms,
         )
+        body = raw.decode("utf-8", "replace")
+        if status == 403 and ("Just a moment" in body or "cloudflare" in body.lower()):
+            raise EngineError(
+                "实例 %s 被 Cloudflare 人机验证拦截（403），浏览器都过不去、程序更不行。"
+                "公共 Lingva 实例大多已死，请在 lingva_instance 里换自托管或临时可用的社区实例，"
+                "或直接换 google / edge / mymemory 引擎" % self.base_url
+            )
         try:
-            data = json.loads(raw.decode("utf-8", "replace"))
+            data = json.loads(body)
         except ValueError as exc:
-            raise EngineError("Lingva 响应不是 JSON: %s" % (raw[:200],)) from exc
+            raise EngineError("Lingva 响应不是 JSON (HTTP %s): %s" % (status, body[:200],)) from exc
 
         translated = data.get("translation")
         if not translated:
@@ -1083,7 +1097,7 @@ ENGINE_LABELS = {
     "libretranslate": "LibreTranslate",
     "deepl": "DeepL（免费档，需 API Key）",
     "mymemory": "MyMemory（匿名免费）",
-    "lingva": "Lingva（Google 免费镜像）",
+    "lingva": "Lingva（Google 免费镜像，公共实例大多被 Cloudflare 拦截）",
     "openai": "AI 翻译（OpenAI 兼容）",
 }
 

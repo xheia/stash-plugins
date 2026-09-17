@@ -23,7 +23,7 @@ from config import load_settings, cache_path
 from engines import EngineError, Router, normalize_proxy
 from stash_api import StashAPI, StashError
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 
 # hook 类型前缀 -> 实体名
 _HOOK_ENTITY = {

@@ -659,6 +659,20 @@ try:
 except engines.EngineError as exc:
     check("Lingva 空译文报错", "未返回译文" in str(exc), str(exc))
 
+# Cloudflare 盾页（2026-09 公共实例实测的主要死法）
+_cf_html = "<html><head><title>Just a moment...</title></head><body>Checking your browser</body></html>".encode()
+def _cf_fake(url, method="GET", headers=None, data=None, timeout=20, proxy="", retries=0, backoff_ms=800):
+    _cf_fake.last_headers = dict(headers or {})
+    return 403, _cf_html
+engines.http_request = _cf_fake
+try:
+    lingva.translate_detailed("Hello")
+    check("Lingva CF 403 应抛错", False)
+except engines.EngineError as exc:
+    check("Lingva CF 403 给出明确诊断", "Cloudflare" in str(exc) and "lingva.ml" in str(exc), str(exc))
+check("Lingva 请求带浏览器 UA", "Mozilla/5.0" in _cf_fake.last_headers.get("User-Agent", ""),
+      str(_cf_fake.last_headers))
+
 engines.http_request = _real_http_request
 
 

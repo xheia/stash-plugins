@@ -15,7 +15,7 @@ description: >-
   百度、腾讯云、阿里云、Lingva、MyMemory、LibreTranslate、EDGE 免认证接口，
   可配置优先级与失败回退；刮削（场景创建 / 更新）时自动触发，也可在任务页手动批量执行；
   翻译完成后详情页自动刷新显示译文。
-version: 1.2.0
+version: 1.2.1
 url: https://github.com/xheia/stash-plugins
 
 exec:
@@ -116,8 +116,9 @@ settings:
     displayName: 主翻译引擎
     description: "可填：google / openai / deepl / tencent / alibaba / baidu /
       edge / lingva / mymemory / libretranslate。
-      免费无需注册：google、lingva、mymemory、edge（免认证但大陆网络常被重置，
-      能否用取决于部署机的代理路径，建议先跑「测试翻译引擎」验证）。"
+      免费无需注册：google、mymemory、edge（免认证但大陆网络常被重置，
+      能否用取决于部署机的代理路径，建议先跑「测试翻译引擎」验证）。
+      lingva 公共实例大多已被 Cloudflare 拦截，除非自托管否则不建议选。"
     type: STRING
 
   engine_fallback:
@@ -279,7 +280,9 @@ settings:
 
   lingva_instance:
     displayName: Lingva - 实例地址
-    description: Google 免费镜像，默认 https://lingva.ml，不可用时换社区实例
+    description: "Google 免费镜像。⚠️ 2026-09 实测公共实例基本全死：
+      lingva.ml 被 Cloudflare 人机验证拦截（403），lunar.icu / esmailelbob.xyz 已下线。
+      仅自托管或确认可用的社区实例才填这里，否则建议直接换 google / edge / mymemory"
     type: STRING
 
   mymemory_email:

@@ -158,7 +158,7 @@ python3 build.py --check    # 只预览会打包哪些文件
 | `deepl`          | API Key（免费档以 `:fx` 结尾）        | 每月 50 万字符                    | **不通**（需代理）              | 好                   |
 | `libretranslate` | 视实例而定                         | 取决于自托管                       | 通                        | **一般**（可能吐出退化内容，见下） |
 | `google`         | 不需要                           | 无明确限制                        | **不通**（需代理）              | 好                   |
-| `lingva`         | 不需要                           | 无明确限制                        | 通（社区实例）                  | 好（Google 同源）        |
+| `lingva`         | 不需要                           | —                              | ❌ **公共实例基本全死**（见下）        | 好（Google 同源）        |
 | `mymemory`       | 不需要（可填邮箱提额）                   | 匿名约 1000 词/天；填邮箱约 5 万词/天     | 通                        | 一般；单次上限 500 字节      |
 | `edge`           | 不需要                           | —                            | **常被重置**                 | 好（微软同源）             |
 
@@ -175,9 +175,9 @@ python3 build.py --check    # 只预览会打包哪些文件
 >
 > 无需任何 token。但在大陆网络下该域名**直连常被 RST**，能否使用完全取决于部署机的  
 > 代理路径（Clash 类工具若把微软域名放直连规则，同样会失败）。装好后跑一次  
-> 「测试翻译引擎」即可确认。不通就换 `google` / `lingva` / `openai`。
+> 「测试翻译引擎」即可确认。不通就换 `google` / `openai`。
 
-> **国内直连环境下真正免注册可用的是 `lingva` / `mymemory`**，配 `openai`（接 DeepSeek / 智谱等国产 API）质量最好。  
+> **国内直连环境下真正免注册可用的是 `mymemory`**，配 `openai`（接 DeepSeek / 智谱等国产 API）质量最好。  
 > Google 的免费端点 `translate.googleapis.com` 在国内不通，且对出口 IP 限流很凶（HTTP 429）。  
 > 有代理的话把地址填进 `http_proxy`。
 >
@@ -195,7 +195,7 @@ python3 build.py --check    # 只预览会打包哪些文件
 
 ```
 engine:          openai
-engine_fallback: tencent,lingva
+engine_fallback: tencent,mymemory
 openai_base_url: https://api.deepseek.com        # 或 Ollama http://localhost:11434
 openai_api_key:  sk-xxx                          # Ollama / LM Studio 留空
 openai_model:    deepseek-chat                   # 或 glm-4-flash / qwen2.5:7b 等
@@ -204,11 +204,11 @@ timeout_s:       120                             # LLM 比机翻慢，超时给�
 
 LLM 翻译对这类内容优势明显：能理解上下文、保留 `#456` 这类编号、人名处理更自然。
 
-**国内直连（无 AI）** → 主引擎 `tencent`，回退 `alibaba,lingva`
+**国内直连（无 AI）** → 主引擎 `tencent`，回退 `alibaba,mymemory`
 
 ```
 engine:          tencent
-engine_fallback: alibaba,lingva
+engine_fallback: alibaba,mymemory
 ```
 
 **有代理** → 主引擎 `google`，回退 `tencent,alibaba`
@@ -219,12 +219,17 @@ engine_fallback: tencent,alibaba
 http_proxy:      http://192.168.3.2:7890
 ```
 
-**完全零成本** → 主引擎 `lingva`，回退 `mymemory,google`
+**完全零成本** → 主引擎 `mymemory`，回退 `google`（需代理）
 
 ```
-engine:          lingva
-engine_fallback: mymemory,google
+engine:          mymemory
+engine_fallback: google
 ```
+
+> ⚠️ **Lingva 公共实例基本全死（2026-09 实测）**：`lingva.ml` 被 Cloudflare
+> 人机验证拦截（403 Just a moment），`lunar.icu` / `esmailelbob.xyz` 已下线，
+> `plausibility.cloud` 返回 500。只有自托管 Lingva 才建议启用该引擎；
+> 放在回退链里也无妨——连续失败 3 次会被熔断跳过，不会拖慢任务。
 
 **只有自托管 LibreTranslate（零成本）** → 主引擎 `libretranslate`，回退留空
 
@@ -380,7 +385,7 @@ Stash 找不到 Python。设置 → 系统 → 应用程序路径 → Python 可
 | 阿里云 `NotSupported` / 语言不支持                          | 目标语言码不在该账号可用列表                  | 换 `target_lang`（如 `zh-CN` → `zh-TW`）                                                 |
 | 百度 `52003: UNAUTHORIZED USER`                       | AppID 无效                        | 核对 `baidu_appid`，确认已开通「通用文本翻译」                                                       |
 | Google `HTTP 429`                                   | 出口 IP 被限流                       | 换引擎，或把 `rate_limit_ms` 调大；免费端点对共享 IP 限制很凶                                            |
-| EDGE 连接被重置 / `10054` / `Connection reset`           | 大陆网络下 `edge.microsoft.com` 常被重置 | 换 `google` / `lingva` / `openai`，或调整代理规则让该域名走代理                                      |
+| EDGE 连接被重置 / `10054` / `Connection reset`           | 大陆网络下 `edge.microsoft.com` 常被重置 | 换 `google` / `openai`，或调整代理规则让该域名走代理                                      |
 | DeepL `HTTP 403`                                    | Key 无效或档位填错                     | 免费 Key（`:fx` 结尾）必须走 `api-free.deepl.com`；地址留空即自动选择                                   |
 | DeepL `HTTP 456`                                    | 本月免费额度耗尽                        | 下月恢复，或改用其它引擎                                                                         |
 | MyMemory `MYMEMORY WARNING`                         | 当日免费额度用尽                        | 填 `mymemory_email` 提额到约 5 万词/天，或换引擎                                                  |
