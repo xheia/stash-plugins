@@ -71,9 +71,13 @@ def build_zip(version, check_only=False):
     count = 0
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for full, rel in iter_files():
-            # 固定时间戳，保证同样内容产出同样的 zip（便于比对 sha256）
+            # 固定时间戳 + 固定权限 + 固定 create_system，保证同样内容产出同样的 zip。
+            # 尤其是 create_system：zipfile 默认按平台取（Windows=0，Unix=3），
+            # 不写死的话，Windows 与 CI 的 Linux runner 会产出内容相同但字节不同的 zip，
+            # sha256 对不上，索引里的校验值也就没法横向比对。
             info = zipfile.ZipInfo(rel, date_time=(1980, 1, 1, 0, 0, 0))
             info.compress_type = zipfile.ZIP_DEFLATED
+            info.create_system = 3          # 3 = Unix，跨平台一致
             info.external_attr = 0o644 << 16
             with open(full, "rb") as fh:
                 zf.writestr(info, fh.read())

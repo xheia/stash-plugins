@@ -18,8 +18,13 @@
 """
 from __future__ import annotations
 
+import contextlib
+import importlib.util
+import io
 import os
 import sys
+import tempfile
+import zipfile
 
 import yaml
 
@@ -28,6 +33,16 @@ ROOT = os.path.dirname(HERE)
 PLUGIN_ID = "translateMetadata"
 MANIFEST = os.path.join(ROOT, "src", PLUGIN_ID, PLUGIN_ID + ".yml")
 INDEX = os.path.join(ROOT, "plugins", "main", "index.yml")
+BUILD_PY = os.path.join(ROOT, "build.py")
+
+
+def load_build_module():
+    """把 build.py 当模块加载（它不在 package 里，得走 importlib）。"""
+    spec = importlib.util.spec_from_file_location("_build_mod", BUILD_PY)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
 
 # ---- 来自 pkg/plugin/config.go 的字段白名单 ---------------------------------- #
 TOP_KEYS = {"name", "description", "url", "version", "interface", "exec",
@@ -179,6 +194,60 @@ def main():
                   str(entry.get("version")) == str(manifest.get("version")),
                   "%s vs %s" % (entry.get("version"), manifest.get("version")))
             check("索引元数据含描述", bool((entry.get("metadata") or {}).get("description")))
+
+    print("\n8) 打包可复现性（Windows 与 Linux 产出同样的 zip）")
+    build_mod = load_build_module()
+    version = str(manifest.get("version"))
+    original_dist = build_mod.DIST_DIR
+    original_root = build_mod.ROOT
+
+    def build_quietly(target_dir, platform_name=None, ver=version):
+        # 临时目录通常在 C 盘而仓库在别的盘，build_zip 里有个 relpath(路径, ROOT)
+        # 会因此抛 ValueError，所以 ROOT 也一起指过去。
+        build_mod.DIST_DIR = target_dir
+        build_mod.ROOT = target_dir
+        real_platform = sys.platform
+        if platform_name:
+            sys.platform = platform_name
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                return build_mod.build_zip(ver)
+        finally:
+            sys.platform = real_platform
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            digests = {}
+            for platform_name in ("win32", "linux"):
+                _, digest, zip_name = build_quietly(tmp, platform_name)
+                digests[platform_name] = digest
+            check("两次打包都拿到 sha256", all(digests.values()), str(digests))
+            check("win32 与 linux 出的 zip 字节一致（create_system 已写死）",
+                  digests.get("win32") == digests.get("linux"), str(digests))
+
+            # 直接验证条目属性，避免只靠"两边碰巧一样"得出结论
+            with zipfile.ZipFile(os.path.join(tmp, zip_name)) as zf:
+                infos = zf.infolist()
+            check("条目 create_system 固定为 3(Unix)",
+                  all(i.create_system == 3 for i in infos),
+                  str(sorted({i.create_system for i in infos})))
+            check("条目时间戳固定为 1980-01-01",
+                  all(i.date_time == (1980, 1, 1, 0, 0, 0) for i in infos))
+            check("条目权限位固定", all(i.external_attr == (0o644 << 16) for i in infos))
+            check("zip 内路径都以插件 ID 开头",
+                  all(i.filename.startswith(PLUGIN_ID + "/") for i in infos),
+                  str([i.filename for i in infos][:3]))
+            check("zip 里没有混进 __pycache__",
+                  not any("__pycache__" in i.filename or i.filename.endswith(".pyc") for i in infos))
+
+        # 重复打包同一版本必须得到同一个哈希（可复现的核心含义）
+        with tempfile.TemporaryDirectory() as tmp:
+            _, first, _ = build_quietly(tmp)
+            _, second, _ = build_quietly(tmp)
+            check("重复打包结果一致", first == second, "%s vs %s" % (first, second))
+    finally:
+        build_mod.DIST_DIR = original_dist
+        build_mod.ROOT = original_root
 
     print("\n" + "=" * 60)
     print("通过 %d 项，失败 %d 项" % (len(PASSED), len(FAILED)))

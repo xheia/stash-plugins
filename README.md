@@ -347,7 +347,22 @@ python3 tests/test_pipeline.py
 python3 build.py
 ```
 
-测试覆盖：清单严格字段校验、索引一致性、语言码映射、阿里云 HMAC-SHA1 签名（官方文档向量）、接入地址归一化、旧插件键名兼容、语言判定、干跑、写回、`custom_fields` 原文留存、幂等、钩子分发、标签别名模式、缓存命中、回滚、引擎全挂时的降级。
+测试覆盖：清单严格字段校验、索引一致性、语言码映射、阿里云 HMAC-SHA1 签名（官方文档向量）、接入地址归一化、旧插件键名兼容、语言判定、干跑、写回、`custom_fields` 原文留存、幂等、钩子分发、标签别名模式、缓存命中、回滚、引擎全挂时的降级、打包可复现性。
+
+### 打包是可复现的
+
+`build.py` 产出的 zip 只用内容决定哈希，同一份源码在 Windows 与 Linux 上产出的 zip **字节完全一致**
+（实测本机 Windows 构建与 GitHub Actions 的 Linux runner 构建得到同一个 sha256，
+也与 Release 资产、索引里的校验值对得上）。靠三处写死：
+
+| 项 | 值 | 为什么 |
+| --- | --- | --- |
+| 条目时间戳 | `1980-01-01 00:00:00` | 否则打包时刻进 zip，哈希每次都变 |
+| 条目权限位 | `0o644` | 否则跟随源文件的实际权限 |
+| `create_system` | `3`（Unix） | **zipfile 默认按平台取（Windows=0，Unix=3）**，不写死就会「内容相同、字节不同」 |
+
+外加 `.gitattributes` 里的 `* text=auto eol=lf`，避免 Windows 的 `core.autocrlf` 把工作区换成 CRLF
+而 CI 是 LF。这三项 + 换行统一都由 `tests/test_manifest.py` 的第 8 组断言守着，改坏了测试会红。
 
 发布：打 tag 推上去即可，GitHub Actions 会跑测试、构建 zip、发 Release 并刷新索引。
 

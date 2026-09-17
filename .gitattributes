@@ -1,0 +1,16 @@
+# 统一换行符为 LF，且在工作区也保持 LF。
+#
+# 为什么需要：本机 core.autocrlf=true，Windows 工作区会被换成 CRLF，
+# 而 CI（Linux）是 LF。插件 zip 是逐字节打包的，换行不同 → sha256 不同
+# → 本地构建的产物跟 Release 里发布的那份对不上哈希，索引校验会困惑。
+#
+# 加了这条之后，Windows 与 Linux 出的 zip 字节一致，build.py 的
+# "固定时间戳" 才真正换得来跨平台可复现。
+* text=auto eol=lf
+
+# 二进制文件不要做换行转换，也不要当文本 diff
+*.zip   binary
+*.png   binary
+*.jpg   binary
+*.ico   binary
+*.sqlite3 binary
