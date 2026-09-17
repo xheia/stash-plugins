@@ -24,8 +24,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PLUGIN_DIR = os.path.join(os.path.dirname(HERE), "src", "translateMetadata")
+# 契约模块在 tests/ 目录下，也要能被 import
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
 sys.path.insert(0, PLUGIN_DIR)
 
+import _schema  # noqa: E402
 import cache as cache_mod  # noqa: E402
 import config as config_mod  # noqa: E402
 import fields  # noqa: E402
@@ -122,6 +126,13 @@ def make_handler(state: FakeStash):
 
 
 def dispatch(state, query, variables):
+    # 先按真实 Stash 的规矩校验一遍请求。
+    # 插件曾经因为拼接类型名时踩了运算符优先级，发出 "SUpdateInputcene"
+    # 这种畸形类型，被 Stash 以 GRAPHQL_VALIDATION_FAILED 拒掉。
+    # 假服务以前只按正则匹配 mutation 名字，畸形的类型名照样当成功处理，
+    # 于是这个 bug 一路骗过了全部测试。这里补上校验。
+    _schema.validate(query)
+
     # 设置读取
     if "configuration" in query and "plugins" in query:
         return {"configuration": {"plugins": {PLUGIN_ID: state.settings}}}

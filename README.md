@@ -40,8 +40,10 @@
 │   └── ui/translateMetadata.js     注入前端的翻译按钮
 ├── plugins/main/index.yml          插件源索引（给 Stash「添加源」用）
 ├── tests/
+│   ├── _schema.py                  Stash schema 契约（名字白名单 + 请求校验器）
 │   ├── test_engines.py             引擎单元测试（含阿里云签名的官方向量校验，不联网）
 │   ├── test_manifest.py            清单 / 索引与 Stash v0.31.1 解析规则的静态校验
+│   ├── test_schema_contract.py     插件用的 GraphQL 名字必须真实存在于 schema
 │   └── test_pipeline.py            端到端流程测试（假 Stash 服务 + 桩引擎，不联网）
 └── build.py                        打包 + 刷新索引
 ```
@@ -51,6 +53,7 @@
 ```bash
 python3 tests/test_engines.py
 python3 tests/test_manifest.py
+python3 tests/test_schema_contract.py
 python3 tests/test_pipeline.py
 ```
 
@@ -340,14 +343,44 @@ python3 tests/test_engines.py
 # 2) 清单与结构校验（不需要网络）
 python3 tests/test_manifest.py
 
-# 3) 端到端流程测试：内置一个假 Stash 服务 + 桩引擎，不需要外网
+# 3) schema 契约：插件用的每个 GraphQL 名字都必须真实存在（不需要网络）
+python3 tests/test_schema_contract.py
+
+# 4) 端到端流程测试：内置一个假 Stash 服务 + 桩引擎，不需要外网
 python3 tests/test_pipeline.py
 
-# 4) 打包
+# 5) 打包
 python3 build.py
 ```
 
-测试覆盖：清单严格字段校验、索引一致性、语言码映射、阿里云 HMAC-SHA1 签名（官方文档向量）、接入地址归一化、旧插件键名兼容、语言判定、干跑、写回、`custom_fields` 原文留存、幂等、钩子分发、标签别名模式、缓存命中、回滚、引擎全挂时的降级、打包可复现性。
+测试覆盖：清单严格字段校验、索引一致性、**schema 契约**、语言码映射、阿里云 HMAC-SHA1 签名（官方文档向量）、接入地址归一化、旧插件键名兼容、语言判定、干跑、写回、`custom_fields` 原文留存、幂等、钩子分发、标签别名模式、缓存命中、回滚、引擎全挂时的降级、打包可复现性。
+
+### 为什么要有 schema 契约测试
+
+v1.1.0 曾经把写回功能整个弄坏过。`fields.py` 里有一句
+
+```python
+input_type = "%sUpdateInput" % entity[0].upper() + entity[1:]
+```
+
+Python 里 `%` 的优先级高于 `+`，所以它实际算的是
+`("S" + "UpdateInput") + "cene"` = **`SUpdateInputcene`**。
+Stash 回 `GRAPHQL_VALIDATION_FAILED: Unknown type "SUpdateInputcene"`，
+四个实体的写回全部失效 —— 而当时 277 项测试全绿。
+
+漏掉的原因是：假 Stash 服务只按正则匹配 mutation 名字（`sceneUpdate(`），
+根本不看变量类型名，畸形的类型名照样被当成合法请求处理。
+
+现在有两道防线，都由 `tests/_schema.py` 提供：
+
+1. **`tests/test_schema_contract.py`** —— 把 schema 里的名字写成契约常量，
+   和插件里用的名字逐字对比；生成的 GraphQL 文档要过一遍校验器；
+   并且把当年那个畸形表达式作为**回归锚点**，确认它现在必然被拦下。
+2. **假 Stash 服务**收到请求先跑同一个校验器，让名字畸变在端到端测试里就炸出来。
+
+写这类代码时注意：**不要用字符串拼接去构造 GraphQL 类型名**。
+`ENTITY_SPECS` 里的 `update_input` / `find_one` / `update` 等都是 schema 里的
+字面名字，直接写死，拼接只会引入这种低级但致命的错误。
 
 ### 打包是可复现的
 
@@ -367,7 +400,7 @@ python3 build.py
 发布：打 tag 推上去即可，GitHub Actions 会跑测试、构建 zip、发 Release 并刷新索引。
 
 ```bash
-git tag v1.1.0 && git push origin v1.1.0
+git tag v1.1.1 && git push origin v1.1.1
 ```
 
 ## License

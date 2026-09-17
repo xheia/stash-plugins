@@ -16,6 +16,14 @@ from __future__ import annotations
 SRC_PREFIX = "tr_src_"
 ENGINE_PREFIX = "tr_engine_"
 
+# 注意：下面每个实体的 update_input / find_one / find_list / list_key / update
+# 都是 Stash GraphQL schema 里的 **字面名字**，一律写死，不做任何拼接。
+# 曾经在 update_mutation 里用 "%sUpdateInput" % entity[0].upper() + entity[1:]
+# 拼类型名，因 % 优先级高于 + 被解析成 ("S" + "UpdateInput") + "cene"
+# = "SUpdateInputcene"，导致所有写回被 Stash 以 GRAPHQL_VALIDATION_FAILED 拒绝。
+# 出处：stash v0.31.1 源码 graphql/schema/types/{scene,performer,studio,tag}.graphql
+# 与 graphql/schema/schema.graphql 的 Mutation 段。
+
 # 字段角色：
 #   plain     —— 普通字段，直接覆盖
 #   tag_name  —— 标签名称，受 tag_name_mode 控制（改名 or 追加别名）
@@ -26,6 +34,7 @@ ENTITY_SPECS = {
         "find_list": "findScenes",
         "list_key": "scenes",
         "update": "sceneUpdate",
+        "update_input": "SceneUpdateInput",
         "fields": [
             {"key": "title", "gate": "translate_title", "label": "标题", "role": "plain"},
             {"key": "details", "gate": "translate_details", "label": "简介", "role": "plain"},
@@ -37,6 +46,7 @@ ENTITY_SPECS = {
         "find_list": "findPerformers",
         "list_key": "performers",
         "update": "performerUpdate",
+        "update_input": "PerformerUpdateInput",
         "fields": [
             {"key": "name", "gate": "translate_names", "label": "姓名", "role": "plain"},
             {"key": "details", "gate": "translate_details", "label": "简介", "role": "plain"},
@@ -48,6 +58,7 @@ ENTITY_SPECS = {
         "find_list": "findStudios",
         "list_key": "studios",
         "update": "studioUpdate",
+        "update_input": "StudioUpdateInput",
         "fields": [
             {"key": "name", "gate": "translate_title", "label": "名称", "role": "plain"},
             {"key": "details", "gate": "translate_details", "label": "简介", "role": "plain"},
@@ -59,6 +70,7 @@ ENTITY_SPECS = {
         "find_list": "findTags",
         "list_key": "tags",
         "update": "tagUpdate",
+        "update_input": "TagUpdateInput",
         "fields": [
             {"key": "name", "gate": "translate_title", "label": "名称", "role": "tag_name"},
             {"key": "description", "gate": "translate_details", "label": "描述", "role": "plain"},
@@ -127,10 +139,9 @@ def list_query(entity):
 
 def update_mutation(entity):
     s = ENTITY_SPECS[entity]
-    input_type = "%sUpdateInput" % entity[0].upper() + entity[1:]
     return (
         "mutation Update($input: %s!) { %s(input: $input) { id } }"
-        % (input_type, s["update"])
+        % (s["update_input"], s["update"])
     )
 
 

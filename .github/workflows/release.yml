@@ -33,6 +33,7 @@ jobs:
         run: |
           python tests/test_engines.py
           python tests/test_manifest.py
+          python tests/test_schema_contract.py
           python tests/test_pipeline.py
 
       - name: Build plugin package and index
