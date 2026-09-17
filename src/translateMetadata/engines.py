@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""翻译引擎：EDGE、Google、百度、腾讯云 TMT、LibreTranslate。
+"""翻译引擎：EDGE、Google、百度、腾讯云 TMT、阿里云机器翻译、LibreTranslate。
 
-只依赖 Python 标准库（urllib / hashlib / hmac / json / time），无需 pip 安装任何东西。
+只依赖 Python 标准库（urllib / hashlib / hmac / json / time / uuid），无需 pip 安装任何东西。
 
 设计要点：
   * 每个引擎暴露统一的 translate_detailed(text, source, target) -> (译文, 检出语言)
@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
@@ -19,6 +20,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 
 
 class EngineError(Exception):
@@ -30,15 +32,15 @@ class EngineError(Exception):
 # 各引擎自己的写法在这里翻译。
 # --------------------------------------------------------------------------- #
 LANG_MAP = {
-    "zh-CN": {"edge": "zh-Hans", "google": "zh-CN", "baidu": "zh", "tencent": "zh", "libretranslate": "zh"},
-    "zh": {"edge": "zh-Hans", "google": "zh-CN", "baidu": "zh", "tencent": "zh", "libretranslate": "zh"},
-    "zh-Hans": {"edge": "zh-Hans", "google": "zh-CN", "baidu": "zh", "tencent": "zh", "libretranslate": "zh"},
-    "zh-TW": {"edge": "zh-Hant", "google": "zh-TW", "baidu": "cht", "tencent": "zh-TW", "libretranslate": "zt"},
-    "zh-Hant": {"edge": "zh-Hant", "google": "zh-TW", "baidu": "cht", "tencent": "zh-TW", "libretranslate": "zt"},
-    "en": {"edge": "en", "google": "en", "baidu": "en", "tencent": "en", "libretranslate": "en"},
-    "ja": {"edge": "ja", "google": "ja", "baidu": "jp", "tencent": "ja", "libretranslate": "ja"},
-    "ko": {"edge": "ko", "google": "ko", "baidu": "kor", "tencent": "ko", "libretranslate": "ko"},
-    "ru": {"edge": "ru", "google": "ru", "baidu": "ru", "tencent": "ru", "libretranslate": "ru"},
+    "zh-CN": {"edge": "zh-Hans", "google": "zh-CN", "baidu": "zh", "tencent": "zh", "alibaba": "zh", "libretranslate": "zh"},
+    "zh": {"edge": "zh-Hans", "google": "zh-CN", "baidu": "zh", "tencent": "zh", "alibaba": "zh", "libretranslate": "zh"},
+    "zh-Hans": {"edge": "zh-Hans", "google": "zh-CN", "baidu": "zh", "tencent": "zh", "alibaba": "zh", "libretranslate": "zh"},
+    "zh-TW": {"edge": "zh-Hant", "google": "zh-TW", "baidu": "cht", "tencent": "zh-TW", "alibaba": "zh-tw", "libretranslate": "zt"},
+    "zh-Hant": {"edge": "zh-Hant", "google": "zh-TW", "baidu": "cht", "tencent": "zh-TW", "alibaba": "zh-tw", "libretranslate": "zt"},
+    "en": {"edge": "en", "google": "en", "baidu": "en", "tencent": "en", "alibaba": "en", "libretranslate": "en"},
+    "ja": {"edge": "ja", "google": "ja", "baidu": "jp", "tencent": "ja", "alibaba": "ja", "libretranslate": "ja"},
+    "ko": {"edge": "ko", "google": "ko", "baidu": "kor", "tencent": "ko", "alibaba": "ko", "libretranslate": "ko"},
+    "ru": {"edge": "ru", "google": "ru", "baidu": "ru", "tencent": "ru", "alibaba": "ru", "libretranslate": "ru"},
 }
 
 # 引擎返回的语言里，哪些算「中文」——用于丢弃「其实原文就是中文」的翻译结果
@@ -443,7 +445,158 @@ class TencentEngine(BaseEngine):
 
 
 # --------------------------------------------------------------------------- #
-# 5. LibreTranslate（自托管或公共实例）
+# 5. 阿里云机器翻译（通用版）—— RPC 协议 + HMAC-SHA1 签名
+#
+#    与腾讯云不同，阿里云走的是老式 RPC 风格：所有参数（含公共参数）放在
+#    query/form 里，签名是对「排序后的参数串」做 HMAC-SHA1 再 Base64。
+#    流程：
+#      1. 收集公共参数（Format / Version / AccessKeyId / SignatureMethod ...）
+#      2. 按参数名做字典序排序，逐个 RFC3986 编码后用 & 拼成规范串
+#      3. StringToSign = POST & %2F & percentEncode(规范串)
+#      4. Signature = Base64(HMAC-SHA1(AccessKeySecret + "&", StringToSign))
+#    文档：https://help.aliyun.com/zh/machine-translation/
+# --------------------------------------------------------------------------- #
+class AlibabaEngine(BaseEngine):
+    name = "alibaba"
+    ACTION = "TranslateGeneral"
+    DETECT_ACTION = "GetDetectLanguage"
+    VERSION = "2018-10-12"
+    SCENE = "general"          # general=通用场景；电商场景可改 goods
+    DEFAULT_HOST = "mt.aliyuncs.com"
+
+    def __init__(self, options=None):
+        super().__init__(options)
+        options = options or {}
+        self.access_key = (options.get("alibaba_access_key") or "").strip()
+        self.access_secret = (options.get("alibaba_access_secret") or "").strip()
+        self.region_id = (options.get("alibaba_region_id") or "").strip()
+
+        # 兼容三种填法：完整地址 / 裸域名 / 地域 ID
+        #   https://mt.cn-hangzhou.aliyuncs.com  -> 取 host
+        #   mt.aliyuncs.com                      -> 原样使用
+        #   cn-hangzhou                          -> 补成 mt.cn-hangzhou.aliyuncs.com
+        raw = (options.get("alibaba_region") or options.get("alibaba_endpoint") or "").strip()
+        host = ""
+        if raw:
+            if "//" in raw:
+                parsed = urllib.parse.urlparse(raw if raw.startswith("http") else "https://" + raw)
+                host = parsed.netloc or parsed.path
+            elif "." in raw:
+                host = raw
+            else:
+                host = "mt.%s.aliyuncs.com" % raw
+        self.host = (host or self.DEFAULT_HOST).strip("/")
+        self.endpoint = "https://" + self.host + "/"
+        # 从 mt.cn-hangzhou.aliyuncs.com 里抠出 cn-hangzhou 作为 RegionId
+        if not self.region_id and self.host.startswith("mt.") and self.host.endswith(".aliyuncs.com"):
+            self.region_id = self.host[len("mt."):-len(".aliyuncs.com")] or ""
+
+    def available(self):
+        return bool(self.access_key and self.access_secret)
+
+    def requires_credentials(self):
+        return ["alibaba_access_key", "alibaba_access_secret"]
+
+    # -- 签名 -------------------------------------------------------------- #
+    @staticmethod
+    def _pe(value):
+        """阿里云要求的百分号编码：空格->%20，斜杠、加号等全部转义。"""
+        return urllib.parse.quote(str(value), safe="")
+
+    def _sign(self, params, method="POST"):
+        canonical = "&".join(
+            "%s=%s" % (self._pe(k), self._pe(v)) for k, v in sorted(params.items())
+        )
+        # 注意：规范串本身还要再整体编码一次，所以 & 与 = 在这里会变成 %26 / %3D，
+        # 这是阿里云规定的做法，不是笔误。
+        string_to_sign = "&".join([method, self._pe("/"), self._pe(canonical)])
+        digest = hmac.new(
+            (self.access_secret + "&").encode("utf-8"),
+            string_to_sign.encode("utf-8"),
+            hashlib.sha1,
+        ).digest()
+        return base64.b64encode(digest).decode("ascii")
+
+    def _invoke(self, action, params):
+        payload = {
+            "Format": "JSON",
+            "Version": self.VERSION,
+            "AccessKeyId": self.access_key,
+            "SignatureMethod": "HMAC-SHA1",
+            "SignatureVersion": "1.0",
+            "SignatureNonce": str(uuid.uuid4()),
+            "Timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "Action": action,
+        }
+        if self.region_id:
+            payload["RegionId"] = self.region_id
+        payload.update(params)
+        payload["Signature"] = self._sign(payload)
+
+        self._throttle()
+        # quote_via=quote 让空格编码成 %20（而不是 urlencode 默认的 +），
+        # 与服务端重算规范串时使用的编码保持一致。
+        body = urllib.parse.urlencode(
+            {k: str(v) for k, v in payload.items()}, quote_via=urllib.parse.quote
+        ).encode("utf-8")
+        status, raw = http_request(
+            self.endpoint,
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            data=body,
+            timeout=self.timeout,
+            proxy=self.proxy,
+        )
+        try:
+            data = json.loads(raw.decode("utf-8", "replace"))
+        except ValueError as exc:
+            raise EngineError("阿里云响应不是 JSON: %s" % (raw[:200],)) from exc
+
+        # 业务错误时 HTTP 仍是 200，靠 Code 判断（Code 是字符串 "200"）
+        code = str(data.get("Code") or "")
+        if code and code != "200":
+            raise EngineError("阿里云报错 %s: %s" % (code, data.get("Message")))
+        return data
+
+    def detect(self, text):
+        data = self._invoke(self.DETECT_ACTION, {"SourceText": text})
+        return data.get("DetectedLanguage") or (data.get("Data") or {}).get("DetectedLanguage")
+
+    def translate_detailed(self, text, source="auto", target="zh-CN"):
+        if not self.available():
+            raise EngineError("阿里云未配置 AccessKeyId / AccessKeySecret")
+
+        target_lang = self.lang(target)
+        requested = self.lang(source) if source and source != "auto" else "auto"
+
+        def call(source_lang):
+            return self._invoke(self.ACTION, {
+                "SourceLanguage": source_lang,
+                "TargetLanguage": target_lang,
+                "SourceText": text,
+                "Scene": self.SCENE,
+            })
+
+        try:
+            data = call(requested)
+        except EngineError:
+            # 通用版对 auto 的支持视账号/接口版本而定：失败就先检测语言再重试一次
+            if requested != "auto":
+                raise
+            detected_lang = self.detect(text)
+            if not detected_lang:
+                raise
+            data = call(detected_lang)
+
+        payload = data.get("Data") or {}
+        translated = payload.get("Translated")
+        if not translated:
+            raise EngineError("阿里云未返回译文: %s" % (json.dumps(data, ensure_ascii=False)[:200],))
+        return translated, payload.get("DetectedLanguage") or payload.get("Source")
+
+
+# --------------------------------------------------------------------------- #
+# 6. LibreTranslate（自托管或公共实例）
 # --------------------------------------------------------------------------- #
 class LibreTranslateEngine(BaseEngine):
     name = "libretranslate"
@@ -451,7 +604,12 @@ class LibreTranslateEngine(BaseEngine):
     def __init__(self, options=None):
         super().__init__(options)
         options = options or {}
-        self.base_url = (options.get("libretranslate_url") or "http://localhost:5000").rstrip("/")
+        base = (options.get("libretranslate_url") or "http://localhost:5000").rstrip("/")
+        # 兼容两种写法：填服务根地址（http://host:5000）或直接填接口地址
+        # （http://host:5000/translate）。后者在别的插件里很常见，这里都接受。
+        if base.endswith("/translate"):
+            base = base[: -len("/translate")]
+        self.base_url = base
         self.api_key = (options.get("libretranslate_api_key") or "").strip()
 
     def translate_detailed(self, text, source="auto", target="zh-CN"):
@@ -500,6 +658,7 @@ ENGINE_CLASSES = {
     GoogleEngine.name: GoogleEngine,
     BaiduEngine.name: BaiduEngine,
     TencentEngine.name: TencentEngine,
+    AlibabaEngine.name: AlibabaEngine,
     LibreTranslateEngine.name: LibreTranslateEngine,
 }
 
@@ -508,6 +667,7 @@ ENGINE_LABELS = {
     "google": "Google（免费）",
     "baidu": "百度翻译",
     "tencent": "腾讯云 TMT",
+    "alibaba": "阿里云机器翻译",
     "libretranslate": "LibreTranslate",
 }
 

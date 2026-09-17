@@ -11,9 +11,9 @@
 name: Metadata Translator
 description: >-
   把场景 / 演员 / 工作室 / 标签的标题与简介自动翻译成中文。
-  支持 EDGE、Google、百度、腾讯、LibreTranslate 五种引擎，可配置优先级与失败回退；
+  支持 EDGE、Google、百度、腾讯云、阿里云、LibreTranslate 六种引擎，可配置优先级与失败回退；
   刮削（场景创建 / 更新）时自动触发，也可在任务页手动批量执行。
-version: 1.0.0
+version: 1.1.0
 url: https://github.com/xheia/stash-plugins
 
 exec:
@@ -108,7 +108,7 @@ ui:
 settings:
   engine:
     displayName: 主翻译引擎
-    description: "可填：edge / google / baidu / tencent / libretranslate"
+    description: "可填：edge / google / baidu / tencent / alibaba / libretranslate"
     type: STRING
 
   engine_fallback:
@@ -226,6 +226,20 @@ settings:
   tencent_region:
     displayName: 腾讯云地域
     description: 默认 ap-guangzhou
+    type: STRING
+
+  alibaba_access_key:
+    displayName: 阿里云 AccessKey ID
+    description: RAM 用户的 AccessKeyId，需要「机器翻译」权限
+    type: STRING
+
+  alibaba_access_secret:
+    displayName: 阿里云 AccessKey Secret
+    type: STRING
+
+  alibaba_region:
+    displayName: 阿里云接入地址
+    description: 默认 mt.aliyuncs.com；也可填 https://mt.cn-hangzhou.aliyuncs.com 或 cn-hangzhou
     type: STRING
 
   libretranslate_url:

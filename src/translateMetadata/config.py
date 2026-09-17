@@ -54,8 +54,33 @@ DEFAULTS = {
     "tencent_secret_id": "",
     "tencent_secret_key": "",
     "tencent_region": "ap-guangzhou",
+    "alibaba_access_key": "",
+    "alibaba_access_secret": "",
+    "alibaba_region": "mt.aliyuncs.com",
     "libretranslate_url": "http://localhost:5000",
     "libretranslate_api_key": "",
+}
+
+# --------------------------------------------------------------------------- #
+# 旧键名兼容
+#
+# 不少中文 Stash 翻译插件用的是 translateXxx 驼峰命名，用户手里往往已经存了
+# 一套凭证。这里做一层只读映射：设置页里没填本插件自己的键时，顺手看一眼旧键。
+#
+# 注意：故意不映射 translateTencentRegion —— 那个键在旧插件里存的是接口地址
+# （https://tmt.tencentcloudapi.com），而本插件的 tencent_region 要的是地域
+# （ap-guangzhou），张冠李戴会直接把请求打到错误的地域上。
+# --------------------------------------------------------------------------- #
+KEY_ALIASES = {
+    "baidu_appid": ("translateBaiduAppid", "translateBaiduAppId"),
+    "baidu_key": ("translateBaiduKey", "translateBaiduSecretKey"),
+    "tencent_secret_id": ("translateTencentSecretId",),
+    "tencent_secret_key": ("translateTencentSecretKey",),
+    "alibaba_access_key": ("translateAlibabaAccessKey",),
+    "alibaba_access_secret": ("translateAlibabaAccessSecret",),
+    "alibaba_region": ("translateAlibabaRegion", "translateAlibabaEndpoint"),
+    "libretranslate_url": ("translateLibretranslateUrl",),
+    "libretranslate_api_key": ("translateLibretranslateApiKey",),
 }
 
 BOOL_KEYS = {k for k, v in DEFAULTS.items() if isinstance(v, bool)}
@@ -163,6 +188,9 @@ class Settings:
             "tencent_secret_id": to_str(self._values.get("tencent_secret_id")),
             "tencent_secret_key": to_str(self._values.get("tencent_secret_key")),
             "tencent_region": to_str(self._values.get("tencent_region"), "ap-guangzhou"),
+            "alibaba_access_key": to_str(self._values.get("alibaba_access_key")),
+            "alibaba_access_secret": to_str(self._values.get("alibaba_access_secret")),
+            "alibaba_region": to_str(self._values.get("alibaba_region"), DEFAULTS["alibaba_region"]),
             "libretranslate_url": to_str(self._values.get("libretranslate_url"), "http://localhost:5000"),
             "libretranslate_api_key": to_str(self._values.get("libretranslate_api_key")),
         }
@@ -196,7 +224,18 @@ def load_settings(api, args=None):
         elif key in args and args[key] is not None:
             value = args[key]
         else:
-            continue
+            # 本插件自己的键没填，看看有没有旧插件命名的同义键
+            alias_value = None
+            for alias in KEY_ALIASES.get(key, ()):
+                for source in (raw, args):
+                    if source and source.get(alias) not in (None, ""):
+                        alias_value = source[alias]
+                        break
+                if alias_value is not None:
+                    break
+            if alias_value is None:
+                continue
+            value = alias_value
 
         if key in BOOL_KEYS:
             overrides[key] = to_bool(value, DEFAULTS[key])

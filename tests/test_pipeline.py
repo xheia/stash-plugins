@@ -27,6 +27,7 @@ PLUGIN_DIR = os.path.join(os.path.dirname(HERE), "src", "translateMetadata")
 sys.path.insert(0, PLUGIN_DIR)
 
 import cache as cache_mod  # noqa: E402
+import config as config_mod  # noqa: E402
 import fields  # noqa: E402
 import log  # noqa: E402
 import translateMetadata as plugin  # noqa: E402
@@ -252,6 +253,16 @@ def install_stub(engine):
     plugin.make_router = lambda settings: StubRouter(engine)
 
 
+class FakeApi:
+    """假的 StashAPI：只回 configuration.plugins，用来验证设置读取与键名兼容。"""
+
+    def __init__(self, values):
+        self.values = values
+
+    def call(self, query, variables=None):
+        return {"configuration": {"plugins": {PLUGIN_ID: self.values}}}
+
+
 # --------------------------------------------------------------------------- #
 # 主测试
 # --------------------------------------------------------------------------- #
@@ -423,6 +434,56 @@ def main():
     check("统计里记录了失败", "失败" in (result.get("output") or ""), str(result))
 
     install_stub(engine)
+
+    print("\n12) 设置读取：旧插件键名兼容")
+    # 用户手里往往已经存着 translateXxx 命名的一套凭证，这里验证能自动认领
+    alias_cfg = {
+        "translateAlibabaAccessKey": "LTAI-test",
+        "translateAlibabaAccessSecret": "secret-test",
+        "translateAlibabaRegion": "https://mt.cn-hangzhou.aliyuncs.com",
+        "translateTencentSecretId": "AKID-test",
+        "translateTencentSecretKey": "key-test",
+        "translateTencentRegion": "https://tmt.tencentcloudapi.com",
+        "translateLibretranslateUrl": "http://192.168.3.96:5353/translate",
+        "translateLibretranslateApiKey": "uuid-test",
+    }
+    opts = config_mod.load_settings(FakeApi(alias_cfg), {}).engine_options()
+    check("旧键名 translateAlibabaAccessKey 被读取", opts["alibaba_access_key"] == "LTAI-test")
+    check("旧键名 translateAlibabaAccessSecret 被读取", opts["alibaba_access_secret"] == "secret-test")
+    check("旧键名 translateAlibabaRegion 被读取",
+          opts["alibaba_region"] == "https://mt.cn-hangzhou.aliyuncs.com")
+    check("旧键名 translateTencentSecretId 被读取", opts["tencent_secret_id"] == "AKID-test")
+    check("旧键名 translateTencentSecretKey 被读取", opts["tencent_secret_key"] == "key-test")
+    check("旧键名 translateLibretranslateUrl 被读取",
+          opts["libretranslate_url"] == "http://192.168.3.96:5353/translate")
+    check("旧键名 translateLibretranslateApiKey 被读取", opts["libretranslate_api_key"] == "uuid-test")
+
+    # translateTencentRegion 存的是接口地址而不是地域，故意不映射
+    check("translateTencentRegion 不被误当作地域",
+          opts["tencent_region"] == "ap-guangzhou", opts["tencent_region"])
+
+    # 本插件自己的键优先级更高
+    own = config_mod.load_settings(FakeApi(dict(alias_cfg, alibaba_access_key="OWN")), {}).engine_options()
+    check("本插件键名优先于旧键名", own["alibaba_access_key"] == "OWN")
+
+    # 任务传入的 args 优先级介于「设置页」与默认值之间：这里设置页为空，应由 args 生效
+    args_only = config_mod.load_settings(FakeApi({}), {"alibaba_access_key": "FROM-ARGS"}).engine_options()
+    check("args 可覆盖空设置", args_only["alibaba_access_key"] == "FROM-ARGS")
+
+    # 什么设置都没有也要能跑起来（退回内置默认）
+    blank = config_mod.load_settings(FakeApi({}), {})
+    check("无任何设置时回退内置默认引擎链",
+          blank.engine_chain == ["edge", "google"], str(blank.engine_chain))
+    check("无任何设置时阿里云凭证为空",
+          not blank.engine_options()["alibaba_access_key"])
+
+    # 读设置失败（接口报错）不应中断任务
+    class BoomApi:
+        def call(self, query, variables):
+            raise RuntimeError("configuration 查询失败")
+
+    safe = config_mod.load_settings(BoomApi(), {})
+    check("读设置失败时退回默认值", safe.engine_chain == ["edge", "google"], str(safe.engine_chain))
 
     server.shutdown()
     if os.path.exists(cache_file):

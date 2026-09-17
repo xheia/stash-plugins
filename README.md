@@ -4,7 +4,7 @@
 
 ## Metadata Translator
 
-把 Stash 里的**标题与简介**自动翻译成中文。支持 **EDGE、Google、百度、腾讯云、LibreTranslate** 五种引擎，可配置优先级与失败自动回退。
+把 Stash 里的**标题与简介**自动翻译成中文。支持 **EDGE、Google、百度、腾讯云、阿里云、LibreTranslate** 六种引擎，可配置优先级与失败自动回退。
 
 覆盖四个实体：
 
@@ -30,7 +30,7 @@
 ├── src/translateMetadata/          插件源码（就是会被安装的内容）
 │   ├── translateMetadata.yml       插件清单：钩子 / 任务 / 设置项声明
 │   ├── translateMetadata.py        入口：stdin 分发钩子与任务
-│   ├── engines.py                  五个翻译引擎 + 优先级回退路由
+│   ├── engines.py                  六个翻译引擎 + 优先级回退路由
 │   ├── detect.py                   中 / 日 / 韩文语言判定
 │   ├── cache.py                    SQLite 翻译缓存
 │   ├── config.py                   插件设置读取与类型规范化
@@ -39,8 +39,19 @@
 │   ├── log.py                      Stash 日志 / 进度协议
 │   └── ui/translateMetadata.js     注入前端的翻译按钮
 ├── plugins/main/index.yml          插件源索引（给 Stash「添加源」用）
-├── tests/                          校验脚本
+├── tests/
+│   ├── test_engines.py             引擎单元测试（含阿里云签名的官方向量校验，不联网）
+│   ├── test_manifest.py            清单 / 索引与 Stash v0.31.1 解析规则的静态校验
+│   └── test_pipeline.py            端到端流程测试（假 Stash 服务 + 桩引擎，不联网）
 └── build.py                        打包 + 刷新索引
+```
+
+跑测试（需要 PyYAML，只用标准库跑插件本体则不需要）：
+
+```bash
+python3 tests/test_engines.py
+python3 tests/test_manifest.py
+python3 tests/test_pipeline.py
 ```
 
 ---
@@ -127,6 +138,7 @@ python3 build.py --check    # 只预览会打包哪些文件
 | `google` | 不需要 | 无明确限制 | **不通**（需代理） | 好 |
 | `baidu` | AppID + 密钥 | 标准版 5 万字符/月 | 通 | 好 |
 | `tencent` | SecretId + SecretKey | 每月 500 万字符（新用户试用额度，以官网为准） | 通 | 好 |
+| `alibaba` | AccessKeyId + AccessKeySecret | 通用版每月 100 万字符（新用户试用额度，以官网为准） | 通 | 好 |
 | `libretranslate` | 视实例而定 | 取决于自托管 | 通 | 一般 |
 
 > 上表的"国内直连"是实测结论；EDGE 与 Google 的翻译端点在国内网络下无法直连。如果你有代理，填进 `http_proxy` 设置即可（例如 `http://192.168.3.2:7890`）。
@@ -155,6 +167,41 @@ python3 build.py --check    # 只预览会打包哪些文件
 2. 在 https://console.cloud.tencent.com/cam/capi 新建密钥，拿到 **SecretId** / **SecretKey**
 3. 填进 `tencent_secret_id` / `tencent_secret_key`；地域默认 `ap-guangzhou` 一般不用改
 
+### 阿里云机器翻译
+
+1. 到 https://mt.console.aliyun.com/ 开通「机器翻译」
+2. 在 https://ram.console.aliyun.com/manage/ak 创建 **AccessKeyId** / **AccessKeySecret**
+   （建议用 RAM 子账号，只授予 `AliyunMTFullAccess`；主账号 AK 权限过大，拿到后务必妥善保管）
+3. 填进 `alibaba_access_key` / `alibaba_access_secret`
+4. `alibaba_region` 留空即用中心接入点 `mt.aliyuncs.com`；要指定地域就填 `cn-hangzhou`
+   或完整地址 `https://mt.cn-hangzhou.aliyuncs.com`，三种写法都认
+
+> **接线协议说明**：阿里云用的是老式 RPC 风格接口（`TranslateGeneral` + HMAC-SHA1 签名），
+> 与腾讯云的 TC3-HMAC-SHA256 不是一回事，代码里是两套独立实现。
+> 签名实现已用阿里云官方文档给出的签名测试向量逐字节校验（见 `tests/test_engines.py`），
+> 签名正确性可离线回归。
+
+### 从旧插件迁移凭证
+
+如果你之前用过别的中文翻译插件，凭证键名可能是 `translateXxx` 驼峰写法。
+本插件会在自己的设置项为空时**自动认领**下列同义键，这样你可以直接把旧配置搬过来：
+
+| 旧键名 | 对应本插件设置 |
+| --- | --- |
+| `translateAlibabaAccessKey` | `alibaba_access_key` |
+| `translateAlibabaAccessSecret` | `alibaba_access_secret` |
+| `translateAlibabaRegion` | `alibaba_region` |
+| `translateTencentSecretId` | `tencent_secret_id` |
+| `translateTencentSecretKey` | `tencent_secret_key` |
+| `translateLibretranslateUrl` | `libretranslate_url` |
+| `translateLibretranslateApiKey` | `libretranslate_api_key` |
+
+在自己插件的设置页里显式填过的值优先，旧键名只是兜底。
+
+> `translateTencentRegion` **不会**被认领。旧插件里这个键存的是接口地址
+> （`https://tmt.tencentcloudapi.com`），而本插件的 `tencent_region` 要的是地域
+> （`ap-guangzhou`）。张冠李戴会把请求打到错误地域上，所以这里故意不映射。
+
 ---
 
 ## 设置项
@@ -182,6 +229,15 @@ python3 build.py --check    # 只预览会打包哪些文件
 | `max_items` | `0` | 单次任务处理上限，0 = 不限 |
 | `cache_enabled` | 开 | 相同文本只请求一次接口 |
 | `http_proxy` | 空 | 走 EDGE / Google 时可能需要 |
+
+凭证类（不填则对应引擎不可用，会自动从引擎链里剔除）：
+
+| 设置 | 说明 |
+| --- | --- |
+| `baidu_appid` / `baidu_key` | 百度翻译的 AppID 与密钥 |
+| `tencent_secret_id` / `tencent_secret_key` | 腾讯云密钥；`tencent_region` 默认 `ap-guangzhou` |
+| `alibaba_access_key` / `alibaba_access_secret` | 阿里云 AccessKey；`alibaba_region` 默认 `mt.aliyuncs.com` |
+| `libretranslate_url` / `libretranslate_api_key` | LibreTranslate 地址与 Key；`url` 填根地址或带 `/translate` 的接口地址都行 |
 
 > **`tag_name_mode` 请重点看一下。** 标签是**全局共享**的，`rename` 会把标签直接改名，影响所有引用它的场景；`alias`（默认）只追加一个中文别名，原名不变、可逆，搜索时中英文都能命中。想要"全站标签都是中文"再改成 `rename`。
 
@@ -255,6 +311,21 @@ Stash 找不到 Python。设置 → 系统 → 应用程序路径 → Python 可
 **翻译失败 / 全部引擎均失败**
 跑「测试翻译引擎」任务，日志里会逐个列出各引擎的成功或失败原因。常见原因：凭证没填、余额/额度用尽、国内直连不到 EDGE / Google（填 `http_proxy`）、LibreTranslate 实例要求 API Key。
 
+各云厂商的报错含义（都遇到过，直接照着查）：
+
+| 报错 | 含义 | 怎么办 |
+| --- | --- | --- |
+| 腾讯云 `AuthFailure.SecretIdNotFound` | SecretId 不存在 | 核对 `tencent_secret_id`，注意别把 SecretKey 填串了 |
+| 腾讯云 `AuthFailure.SignatureFailure` | 签名不对 | 检查系统时间是否偏差过大（签名带时间戳） |
+| 阿里云 `InvalidAccessKeyId.NotFound` | AccessKeyId 不存在 | 核对 `alibaba_access_key` |
+| 阿里云 `InvalidAccessKeyId.Inactive` | **AccessKey 已被禁用** | 到 RAM 控制台把该 AK 重新启用，或换一个 |
+| 阿里云 `SignatureDoesNotMatch` | 签名不对 | 核对 `alibaba_access_secret`；这个报错说明 AK 本身是有效的 |
+| 阿里云 `NotSupported` / 语言不支持 | 目标语言码不在该账号可用列表 | 换 `target_lang`（如 `zh-CN` → `zh-TW`） |
+| 百度 `52003: UNAUTHORIZED USER` | AppID 无效 | 核对 `baidu_appid`，确认已开通「通用文本翻译」 |
+
+> 注意报错顺序：阿里云会先校验 AccessKey 再校验签名，所以 AK 有问题时不会出现
+> `SignatureDoesNotMatch`。换句话说，看到 `InvalidAccessKeyId.*` 时无法据此判断签名是否正确。
+
 **批量任务跑到一半提示失败**
 多半是免费额度用尽或被限流。把 `rate_limit_ms` 调大（比如 1000），用 `max_items` 限制单次处理量，分几次跑完。
 
@@ -263,22 +334,25 @@ Stash 找不到 Python。设置 → 系统 → 应用程序路径 → Python 可
 ## 开发
 
 ```bash
-# 1) 清单与结构校验（不需要网络）
+# 1) 引擎单元测试：语言码映射、地址归一化、阿里云签名（用官方文档向量校验）、路由降级
+python3 tests/test_engines.py
+
+# 2) 清单与结构校验（不需要网络）
 python3 tests/test_manifest.py
 
-# 2) 端到端流程测试：内置一个假 Stash 服务 + 桩引擎，不需要外网
+# 3) 端到端流程测试：内置一个假 Stash 服务 + 桩引擎，不需要外网
 python3 tests/test_pipeline.py
 
-# 3) 打包
+# 4) 打包
 python3 build.py
 ```
 
-测试覆盖：清单严格字段校验、语言判定、干跑、写回、`custom_fields` 原文留存、幂等、钩子分发、标签别名模式、缓存命中、回滚、引擎全挂时的降级。
+测试覆盖：清单严格字段校验、索引一致性、语言码映射、阿里云 HMAC-SHA1 签名（官方文档向量）、接入地址归一化、旧插件键名兼容、语言判定、干跑、写回、`custom_fields` 原文留存、幂等、钩子分发、标签别名模式、缓存命中、回滚、引擎全挂时的降级。
 
 发布：打 tag 推上去即可，GitHub Actions 会跑测试、构建 zip、发 Release 并刷新索引。
 
 ```bash
-git tag v1.0.1 && git push origin v1.0.1
+git tag v1.1.0 && git push origin v1.1.0
 ```
 
 ## License
