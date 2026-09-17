@@ -23,7 +23,7 @@ from config import load_settings, cache_path
 from engines import EngineError, Router, normalize_proxy
 from stash_api import StashAPI, StashError
 
-VERSION = "1.2.2"
+VERSION = "1.2.3"
 
 # hook 类型前缀 -> 实体名
 _HOOK_ENTITY = {
@@ -186,14 +186,18 @@ def run_hook(api, settings, router, cache, hook_context):
     record_id = (hook_context or {}).get("id")
 
     if not entity:
+        log.info("[钩子] %s 不在翻译范围内，忽略" % hook_type)
         return "忽略：%s 不在翻译范围内" % hook_type
 
     if not settings.auto_enabled(entity):
+        log.info("[钩子] %s 收到触发，但「自动翻译 - %s」未开启" % (hook_type, fields.label(entity)))
         return "忽略：%s 的自动翻译已关闭" % fields.label(entity)
 
+    log.info("[钩子] %s 触发，翻译 %s#%s ..." % (hook_type, fields.label(entity), record_id))
     data = api.call(fields.one_query(entity), {"id": str(record_id)})
     record = fields.extract_one(entity, data)
     if not record:
+        log.info("[钩子] %s#%s 查询不到记录" % (fields.label(entity), record_id))
         return "未找到 %s#%s" % (fields.label(entity), record_id)
 
     translator = Translator(settings, router, cache)
@@ -201,6 +205,8 @@ def run_hook(api, settings, router, cache, hook_context):
     written = write_entity(api, entity, record, items, settings, dry_run=False)
 
     if not written:
+        log.info("[钩子] %s#%s 无需翻译（可能已是中文或没有可译字段）"
+                 % (fields.label(entity), record_id))
         return "%s#%s 无需翻译" % (fields.label(entity), record_id)
     return "%s#%s 已翻译 %s" % (fields.label(entity), record_id, ", ".join(written))
 

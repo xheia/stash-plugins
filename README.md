@@ -391,6 +391,7 @@ Stash 找不到 Python。设置 → 系统 → 应用程序路径 → Python 可
 | MyMemory `MYMEMORY WARNING`                         | 当日免费额度用尽                        | 填 `mymemory_email` 提额到约 5 万词/天，或换引擎                                                  |
 | AI 翻译 `Incorrect API key` / 401                     | Key 不对或服务不匹配                    | 核对 `openai_api_key`；注意模型名要与所用服务匹配（DeepSeek 没有 `gpt-*`）                               |
 | AI 翻译 `ModuleNotFoundError` / 404                   | 接口地址不对                          | 确认 `openai_base_url` 是否为该服务的 OpenAI 兼容端点；Ollama 需 `Ollama serve` 且已 `ollama pull` 模型 |
+| **识别（Identify）后没有自动翻译**                         | 钩子只在识别**实际改动了字段**时触发            | Stash 源码：识别结果与现有数据完全一致时（updater 为空）不触发 `Scene.Update.Post` 钩子。确认该场景的标题/简介确实被识别改写过；v1.2.3 起钩子触发与跳过原因都会打 Info 日志，跑一次识别看日志即可定位 |
 
 > 注意报错顺序：阿里云会先校验 AccessKey 再校验签名，所以 AK 有问题时不会出现  
 > `SignatureDoesNotMatch`。换句话说，看到 `InvalidAccessKeyId.*` 时无法据此判断签名是否正确。
