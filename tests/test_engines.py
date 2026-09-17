@@ -563,8 +563,10 @@ out = deepl.translate_detailed("Hello, world")
 check("DeepL 正常解析", out == ("你好，世界", "EN"), str(out))
 check("DeepL 请求打到 translate 端点", "/v2/translate" in deepl_translate_url if (deepl_translate_url := getattr(engines.http_request, "last_url", "")) else False,
       str(getattr(engines.http_request, "last_url", "")))
-check("DeepL 表单带 auth_key", "auth_key=abc123%3Afx" in engines.http_request.last_body,
-      engines.http_request.last_body[:120])
+check("DeepL 用 Authorization 头鉴权（表单不再带 auth_key）",
+      "auth_key=" not in engines.http_request.last_body
+      and engines.http_request.last_headers.get("Authorization") == "DeepL-Auth-Key abc123:fx",
+      "headers=%s body=%s" % (engines.http_request.last_headers, engines.http_request.last_body[:80]))
 
 engines.http_request = _stub_http(403, {"message": "Wrong key"})
 try:

@@ -814,7 +814,6 @@ class DeepLEngine(BaseEngine):
             raise EngineError("DeepL 未配置 API Key（deepl.com 免费注册，Key 以 :fx 结尾）")
 
         form = {
-            "auth_key": self.auth_key,
             "text": text,
             # DeepL 的简体中文目标码就是 ZH（繁体暂不支持，会落到简体）
             "target_lang": self.lang(target),
@@ -826,7 +825,11 @@ class DeepLEngine(BaseEngine):
         status, raw = http_request(
             self.api_url,
             method="POST",
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                # DeepL v2 只认请求头鉴权，表单里传 auth_key 是旧版写法、会被 403 拒绝
+                "Authorization": "DeepL-Auth-Key " + self.auth_key,
+            },
             data=urllib.parse.urlencode(form).encode("utf-8"),
             timeout=self.timeout,
             proxy=self.proxy,

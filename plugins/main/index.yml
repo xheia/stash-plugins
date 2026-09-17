@@ -2,7 +2,7 @@
   name: Metadata Translator
   metadata:
     description: 把场景 / 演员 / 工作室 / 标签的标题与简介自动翻译成中文。 支持 AI 翻译（OpenAI 兼容，可接 DeepSeek / Ollama / 智谱等）、Google、DeepL、 百度、腾讯云、阿里云、Lingva、MyMemory、LibreTranslate、EDGE 免认证接口， 可配置优先级与失败回退；刮削（场景创建 / 更新）时自动触发，也可在任务页手动批量执行； 翻译完成后详情页自动刷新显示译文。
-  version: 1.2.1
-  date: 2026-09-17 11:32:49
-  path: https://github.com/xheia/stash-plugins/releases/download/v1.2.1/translateMetadata-v1.2.1.zip
-  sha256: da5219c4d303777f67b0d4e1822ce05264e65815abec4acf65671f59294a86cd
+  version: 1.2.2
+  date: 2026-09-17 20:08:42
+  path: https://github.com/xheia/stash-plugins/releases/download/v1.2.2/translateMetadata-v1.2.2.zip
+  sha256: 17d4563b70bb3f95205d27338c3c5bacfd1aa76e80e6340d0708ffc6bcfdaf95
