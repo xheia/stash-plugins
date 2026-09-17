@@ -1,0 +1,239 @@
+# ============================================================================
+# Metadata Translator — Stash v0.31.x 插件清单
+#
+# 插件 ID 由本文件名决定：translateMetadata
+# 所有可调参数都在「设置 -> 插件 -> Metadata Translator」里改，改完无需重载插件。
+#
+# 注意：Stash 对插件 YAML 使用严格解析，出现未知字段会直接加载失败。
+#       本文件只使用 v0.31.1 源码确认过的字段。
+# ============================================================================
+
+name: Metadata Translator
+description: >-
+  把场景 / 演员 / 工作室 / 标签的标题与简介自动翻译成中文。
+  支持 EDGE、Google、百度、腾讯、LibreTranslate 五种引擎，可配置优先级与失败回退；
+  刮削（场景创建 / 更新）时自动触发，也可在任务页手动批量执行。
+version: 1.0.0
+url: https://github.com/xheia/stash-plugins
+
+exec:
+  - python3
+  - "{pluginDir}/translateMetadata.py"
+
+interface: raw
+errLog: info
+
+# ---------------------------------------------------------------------------
+# 手动任务（设置 -> 任务 -> 插件任务）
+# defaultArgs 的值必须是字符串，脚本内部会自行做类型转换。
+# ---------------------------------------------------------------------------
+tasks:
+  - name: 翻译 - 全部（场景 + 演员 + 工作室 + 标签）
+    description: 扫描全库，翻译尚未翻译或原文非中文的标题与简介
+    defaultArgs:
+      mode: all
+
+  - name: 翻译 - 仅场景
+    description: 只处理场景的标题与简介
+    defaultArgs:
+      mode: scene
+
+  - name: 翻译 - 仅演员
+    description: 只处理演员的简介（姓名默认不动，可在设置里开启）
+    defaultArgs:
+      mode: performer
+
+  - name: 翻译 - 仅工作室
+    description: 只处理工作室的名称与简介
+    defaultArgs:
+      mode: studio
+
+  - name: 翻译 - 仅标签
+    description: 只处理标签的名称与描述
+    defaultArgs:
+      mode: tag
+
+  - name: 翻译 - 干跑预览（不写回）
+    description: 完整走一遍流程并打印译文，但不修改数据库，用于先确认效果
+    defaultArgs:
+      mode: all
+      dry_run: "true"
+
+  - name: 测试翻译引擎
+    description: 逐个调用已配置的引擎翻译一段示例文本，报告连通性与耗时
+    defaultArgs:
+      mode: selftest
+
+  - name: 回滚翻译（恢复原文）
+    description: 从 custom_fields 里取回翻译前的原文并写回，撤销本插件的翻译
+    defaultArgs:
+      mode: rollback
+
+  - name: 清空翻译缓存
+    description: 删除本地翻译缓存，下次翻译会重新请求接口
+    defaultArgs:
+      mode: clearcache
+
+# ---------------------------------------------------------------------------
+# 自动 Hook：刮削写入元数据后自动翻译
+#
+# 说明：Stash v0.31.1 没有「扫描完成」钩子（源码中明确标注 scan 相关钩子尚未启用），
+#       所以自动翻译挂在实体写入之后 —— 刮削器把数据写进数据库时即触发。
+# ---------------------------------------------------------------------------
+hooks:
+  - name: 元数据写入后自动翻译
+    description: 场景 / 演员 / 工作室 / 标签被创建或更新时，自动翻译标题与简介
+    triggeredBy:
+      - Scene.Create.Post
+      - Scene.Update.Post
+      - Performer.Create.Post
+      - Performer.Update.Post
+      - Studio.Create.Post
+      - Studio.Update.Post
+      - Tag.Create.Post
+      - Tag.Update.Post
+    defaultArgs:
+      mode: hook
+
+# ---------------------------------------------------------------------------
+# 前端脚本：在导航栏加一个「译」按钮，翻译当前打开页面的实体
+# ---------------------------------------------------------------------------
+ui:
+  javascript:
+    - ui/translateMetadata.js
+
+# ---------------------------------------------------------------------------
+# 设置项（设置 -> 插件 -> Metadata Translator）
+# ---------------------------------------------------------------------------
+settings:
+  engine:
+    displayName: 主翻译引擎
+    description: "可填：edge / google / baidu / tencent / libretranslate"
+    type: STRING
+
+  engine_fallback:
+    displayName: 回退引擎链
+    description: 主引擎失败时按顺序尝试，英文逗号分隔，例如 edge,google
+    type: STRING
+
+  target_lang:
+    displayName: 目标语言
+    description: "默认 zh-CN（简体中文），可填 zh-TW / en / ja 等"
+    type: STRING
+
+  source_lang:
+    displayName: 源语言
+    description: 默认 auto 自动检测
+    type: STRING
+
+  auto_scene:
+    displayName: 自动翻译 - 场景
+    description: 场景创建或更新时自动翻译
+    type: BOOLEAN
+
+  auto_performer:
+    displayName: 自动翻译 - 演员
+    type: BOOLEAN
+
+  auto_studio:
+    displayName: 自动翻译 - 工作室
+    type: BOOLEAN
+
+  auto_tag:
+    displayName: 自动翻译 - 标签
+    description: 标签是全局共享的，开启前请先看 tag_name_mode 的说明
+    type: BOOLEAN
+
+  translate_title:
+    displayName: 翻译标题 / 名称字段
+    description: 场景标题、演员姓名、工作室名称、标签名称
+    type: BOOLEAN
+
+  translate_details:
+    displayName: 翻译简介字段
+    description: 场景简介、演员简介、工作室简介、标签描述
+    type: BOOLEAN
+
+  translate_names:
+    displayName: 允许翻译人名类字段
+    description: 演员姓名属于专有名词，默认关闭；工作室与标签名称不受此项影响
+    type: BOOLEAN
+
+  tag_name_mode:
+    displayName: 标签名称处理方式
+    description: "alias = 保留原名并追加中文别名（默认，可逆）；rename = 直接把标签改名"
+    type: STRING
+
+  skip_existing:
+    displayName: 跳过已是中文的内容
+    description: 开启后，含中文的文本不再翻译，这也是自动翻译不会死循环的关键
+    type: BOOLEAN
+
+  ambiguous_cjk:
+    displayName: 纯汉字（可能是日文）的处理
+    description: "skip = 当作中文跳过（默认）；detect = 调用引擎检测语言，日文才翻译"
+    type: STRING
+
+  keep_original:
+    displayName: 保留原文以便回滚
+    description: 译文写入的同时把原文存进 custom_fields，可用「回滚翻译」任务撤销
+    type: BOOLEAN
+
+  rate_limit_ms:
+    displayName: 请求间隔（毫秒）
+    description: 两次翻译请求之间的最小间隔，防止打爆接口，默认 300
+    type: NUMBER
+
+  timeout_s:
+    displayName: 单个请求超时（秒）
+    type: NUMBER
+
+  batch_size:
+    displayName: 批量任务每页条数
+    type: NUMBER
+
+  max_items:
+    displayName: 单次任务处理上限
+    description: 0 表示不限制
+    type: NUMBER
+
+  cache_enabled:
+    displayName: 启用本地翻译缓存
+    description: 相同文本只请求一次接口，可显著减少额度消耗
+    type: BOOLEAN
+
+  http_proxy:
+    displayName: HTTP 代理
+    description: 可选。国内直连 Google / EDGE 不通时填写，例如 http://192.168.3.2:7890
+    type: STRING
+
+  baidu_appid:
+    displayName: 百度翻译 AppID
+    type: STRING
+
+  baidu_key:
+    displayName: 百度翻译密钥
+    type: STRING
+
+  tencent_secret_id:
+    displayName: 腾讯云 SecretId
+    type: STRING
+
+  tencent_secret_key:
+    displayName: 腾讯云 SecretKey
+    type: STRING
+
+  tencent_region:
+    displayName: 腾讯云地域
+    description: 默认 ap-guangzhou
+    type: STRING
+
+  libretranslate_url:
+    displayName: LibreTranslate 地址
+    description: 默认 http://localhost:5000
+    type: STRING
+
+  libretranslate_api_key:
+    displayName: LibreTranslate API Key
+    description: 自托管未开启鉴权时留空
+    type: STRING

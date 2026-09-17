@@ -1,0 +1,61 @@
+name: Release plugin
+
+# 打 tag 即发布：构建插件 zip、发 Release、刷新插件索引
+# 用法： git tag v1.0.1 && git push origin v1.0.1
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: pip install pyyaml
+
+      - name: Run tests
+        run: |
+          python tests/test_manifest.py
+          python tests/test_pipeline.py
+
+      - name: Build plugin package and index
+        id: build
+        run: |
+          python build.py
+          VERSION=$(python -c "import yaml;print(yaml.safe_load(open('src/translateMetadata/translateMetadata.yml'))['version'])")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Metadata Translator v${{ steps.build.outputs.version }}
+          files: dist/*.zip
+          generate_release_notes: true
+
+      - name: Commit refreshed index
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add plugins/main/index.yml
+          if git diff --cached --quiet; then
+            echo "索引无变化，跳过提交"
+          else
+            git commit -m "chore: refresh plugin index for v${{ steps.build.outputs.version }}"
+            git push
+          fi

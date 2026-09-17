@@ -1,0 +1,441 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""端到端流程测试（不依赖外网、不依赖真实 Stash）。
+
+做法：
+  * 起一个假的 Stash GraphQL 服务，内存里存场景/演员/工作室/标签，
+    实现插件真正会调用的那几个查询与 mutation（含 custom_fields 的 partial / remove 语义）。
+  * 把引擎层替换成桩，返回确定性的「中文」译文，从而验证的是流程而不是翻译质量。
+  * 以真实方式喂 stdin、捕获 stdout，覆盖：配置读取、干跑、写回、幂等、
+    Hook 分发、标签别名模式、原文回滚、缓存命中。
+
+用法：
+    python3 tests/test_pipeline.py
+退出码 0 表示全部通过。
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+PLUGIN_DIR = os.path.join(os.path.dirname(HERE), "src", "translateMetadata")
+sys.path.insert(0, PLUGIN_DIR)
+
+import cache as cache_mod  # noqa: E402
+import fields  # noqa: E402
+import log  # noqa: E402
+import translateMetadata as plugin  # noqa: E402
+from config import Settings  # noqa: E402
+from engines import EngineError, TranslateResult  # noqa: E402
+from stash_api import StashAPI  # noqa: E402
+
+PLUGIN_ID = "translateMetadata"
+
+PASSED = []
+FAILED = []
+
+
+def check(name, condition, detail=""):
+    if condition:
+        PASSED.append(name)
+        print("  [PASS] %s" % name)
+    else:
+        FAILED.append(name)
+        print("  [FAIL] %s %s" % (name, detail))
+
+
+# --------------------------------------------------------------------------- #
+# 假 Stash：内存数据库 + GraphQL 网关
+# --------------------------------------------------------------------------- #
+QUERY_ON_ONE = {
+    "scene": "findScene",
+    "performer": "findPerformer",
+    "studio": "findStudio",
+    "tag": "findTag",
+}
+QUERY_ON_LIST = {
+    "scene": ("findScenes", "scenes"),
+    "performer": ("findPerformers", "performers"),
+    "studio": ("findStudios", "studios"),
+    "tag": ("findTags", "tags"),
+}
+MUTATION_ON = {
+    "sceneUpdate": "scene",
+    "performerUpdate": "performer",
+    "studioUpdate": "studio",
+    "tagUpdate": "tag",
+}
+
+
+class FakeStash:
+    def __init__(self):
+        self.db = {"scene": [], "performer": [], "studio": [], "tag": []}
+        self.settings = {
+            "engine": "edge",
+            "target_lang": "zh-CN",
+            "source_lang": "auto",
+            "rate_limit_ms": 0,
+            "cache_enabled": True,
+            "keep_original": True,
+            "tag_name_mode": "alias",
+            "translate_names": "true",
+        }
+        self.mutations = 0
+
+    # -- 造数据 ------------------------------------------------------------ #
+    def seed(self, entity, records):
+        for index, record in enumerate(records, start=1):
+            item = {"id": str(index), "custom_fields": {}}
+            item.update(record)
+            self.db[entity].append(item)
+
+
+def make_handler(state: FakeStash):
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length).decode("utf-8"))
+            query = body.get("query") or ""
+            variables = body.get("variables") or {}
+            try:
+                data = dispatch(state, query, variables)
+                payload = {"data": data}
+            except Exception as exc:  # 让插件看到 GraphQL 错误
+                payload = {"errors": [{"message": str(exc)}]}
+            raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+    return Handler
+
+
+def dispatch(state, query, variables):
+    # 设置读取
+    if "configuration" in query and "plugins" in query:
+        return {"configuration": {"plugins": {PLUGIN_ID: state.settings}}}
+
+    # 单个实体
+    for entity, field in QUERY_ON_ONE.items():
+        match = re.search(r"\b%s\s*\(\s*id\s*:" % field, query)
+        if match and field in query:
+            target = str(variables.get("id"))
+            for record in state.db[entity]:
+                if record["id"] == target:
+                    return {field: dict(record)}
+            return {field: None}
+
+    # 列表
+    for entity, (field, list_key) in QUERY_ON_LIST.items():
+        if re.search(r"\b%s\s*\(" % field, query):
+            records = sorted(state.db[entity], key=lambda r: int(r["id"]))
+            find_filter = variables.get("filter") or {}
+            page = int(find_filter.get("page") or 1)
+            per_page = int(find_filter.get("per_page") or 100)
+            start = (page - 1) * per_page
+            chunk = records[start:start + per_page]
+            return {field: {"count": len(records), list_key: [dict(r) for r in chunk]}}
+
+    # 更新
+    for mutation_name, entity in MUTATION_ON.items():
+        if re.search(r"\b%s\s*\(" % mutation_name, query):
+            payload = variables.get("input") or {}
+            target = str(payload.get("id"))
+            for record in state.db[entity]:
+                if record["id"] != target:
+                    continue
+                custom_in = payload.get("custom_fields")
+                for key, value in payload.items():
+                    if key in ("id", "custom_fields"):
+                        continue
+                    record[key] = value
+                if isinstance(custom_in, dict):
+                    if "partial" in custom_in:
+                        record["custom_fields"].update(custom_in["partial"] or {})
+                    if "remove" in custom_in:
+                        for key in custom_in["remove"] or []:
+                            record["custom_fields"].pop(key, None)
+                    if "full" in custom_in:
+                        record["custom_fields"] = dict(custom_in["full"] or {})
+                state.mutations += 1
+                return {mutation_name: {"id": target}}
+            raise ValueError("no such record: %s#%s" % (entity, target))
+
+    raise ValueError("未处理的查询: %s" % query[:120])
+
+
+# --------------------------------------------------------------------------- #
+# 桩引擎：确定性中文译文
+# --------------------------------------------------------------------------- #
+class StubEngine:
+    def __init__(self, with_latin=False):
+        self.calls = 0
+        self.with_latin = with_latin
+
+    def translate_detailed(self, text, source="auto", target="zh-CN"):
+        self.calls += 1
+        if self.with_latin:
+            # 故意让译文含拉丁字母，用来验证 tr_src 幂等保护是否生效
+            return "Chinese(%s)" % text, "en"
+        return "译文%s" % self.calls, "en"
+
+    def translate(self, text, source="auto", target="zh-CN"):
+        return self.translate_detailed(text, source, target)[0]
+
+
+class StubRouter:
+    def __init__(self, engine):
+        self.engine = engine
+        self.missing = []
+
+    def has_engine(self):
+        return True
+
+    def chain_names(self):
+        return ["edge"]
+
+    def translate(self, text, source="auto", target="zh-CN"):
+        translated, detected = self.engine.translate_detailed(text, source, target)
+        return TranslateResult(translated, "edge", detected, text)
+
+    def test_all(self, sample="Hello"):
+        return [("EDGE（桩）", True, "译文", 1)]
+
+
+# --------------------------------------------------------------------------- #
+# 驱动插件
+# --------------------------------------------------------------------------- #
+def run_plugin(state, port, args, hook_context=None):
+    """以真实方式运行插件入口，返回 (stdout 解析结果, stderr 文本)。"""
+    import io
+
+    payload = {
+        "server_connection": {
+            "Scheme": "http",
+            "Host": "127.0.0.1",
+            "Port": port,
+            "SessionCookie": {"Name": "session", "Value": "fake"},
+            "Dir": "/tmp",
+            "PluginDir": PLUGIN_DIR,
+        },
+        "args": dict(args),
+    }
+    if hook_context:
+        payload["args"]["hookContext"] = hook_context
+
+    old_stdin, old_stdout, old_stderr = sys.stdin, sys.stdout, sys.stderr
+    out, err = io.StringIO(), io.StringIO()
+    try:
+        sys.stdin = io.StringIO(json.dumps(payload, ensure_ascii=False))
+        sys.stdout, sys.stderr = out, err
+        code = plugin.main()
+    finally:
+        sys.stdin, sys.stdout, sys.stderr = old_stdin, old_stdout, old_stderr
+
+    text = out.getvalue().strip()
+    parsed = json.loads(text.splitlines()[-1]) if text else {}
+    return code, parsed, err.getvalue()
+
+
+def install_stub(engine):
+    """把引擎层替换成桩。"""
+    plugin.make_router = lambda settings: StubRouter(engine)
+
+
+# --------------------------------------------------------------------------- #
+# 主测试
+# --------------------------------------------------------------------------- #
+def main():
+    log.enable_progress(False)
+
+    # 每次从干净的缓存开始
+    cache_file = os.path.join(PLUGIN_DIR, "translate-cache.sqlite3")
+    if os.path.exists(cache_file):
+        os.remove(cache_file)
+
+    state = FakeStash()
+    state.seed("scene", [
+        {"title": "Beautiful Nurse", "details": "A story about a nurse.", "custom_fields": {}},
+        {"title": "纯中文标题", "details": "已经是中文的简介", "custom_fields": {}},
+    ])
+    state.seed("performer", [
+        {"name": "Akiho Yoshizawa", "details": "Famous performer", "custom_fields": {}},
+    ])
+    state.seed("studio", [
+        {"name": "Tokyo Studio", "details": "A studio in Tokyo", "custom_fields": {}},
+    ])
+    state.seed("tag", [
+        {"name": "Nurse", "description": "medical role", "aliases": [], "custom_fields": {}},
+    ])
+
+    server = HTTPServer(("127.0.0.1", 0), make_handler(state))
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    print("假 Stash 服务已启动: 127.0.0.1:%d\n" % port)
+
+    engine = StubEngine()
+    install_stub(engine)
+
+    print("1) 测试引擎（selftest）")
+    code, result, _ = run_plugin(state, port, {"mode": "selftest"})
+    check("selftest 返回 0", code == 0, str(code))
+    check("selftest 有输出", bool(result.get("output")), str(result))
+
+    print("\n2) 干跑预览（不写回）")
+    before = json.dumps(state.db, ensure_ascii=False, sort_keys=True)
+    code, result, _ = run_plugin(state, port, {"mode": "all", "dry_run": "true"})
+    check("干跑返回 0", code == 0, str(code))
+    check("干跑未改动数据库", before == json.dumps(state.db, ensure_ascii=False, sort_keys=True))
+    check("干跑结果标注", "干跑" in (result.get("output") or ""), str(result))
+
+    print("\n3) 正式批量翻译")
+    code, result, _ = run_plugin(state, port, {"mode": "all"})
+    check("批量返回 0", code == 0, str(code))
+    scene0 = state.db["scene"][0]
+    check("场景标题已翻译", scene0["title"].startswith("译文"), scene0["title"])
+    check("场景简介已翻译", scene0["details"].startswith("译文"), scene0["details"])
+    check("原文已存入 custom_fields",
+          scene0["custom_fields"].get("tr_src_title") == "Beautiful Nurse",
+          str(scene0["custom_fields"]))
+    check("记录了所用引擎",
+          scene0["custom_fields"].get("tr_engine_title") == "edge",
+          str(scene0["custom_fields"]))
+    check("纯中文场景未被改动",
+          state.db["scene"][1]["title"] == "纯中文标题",
+          state.db["scene"][1]["title"])
+    check("演员姓名已翻译", state.db["performer"][0]["name"].startswith("译文"))
+    check("工作室名称已翻译", state.db["studio"][0]["name"].startswith("译文"))
+
+    print("\n4) 标签别名模式（默认 alias）")
+    tag = state.db["tag"][0]
+    check("标签原名保留", tag["name"] == "Nurse", tag["name"])
+    check("中文别名已追加", len(tag.get("aliases") or []) == 1, str(tag.get("aliases")))
+
+    print("\n5) 幂等：再跑一次不应有新的翻译")
+    calls_before = engine.calls
+    mutations_before = state.mutations
+    code, result, _ = run_plugin(state, port, {"mode": "all"})
+    check("二次运行返回 0", code == 0, str(code))
+    check("二次运行未再调用引擎", engine.calls == calls_before,
+          "calls %d -> %d" % (calls_before, engine.calls))
+    check("二次运行未产生写操作", state.mutations == mutations_before,
+          "mutations %d -> %d" % (mutations_before, state.mutations))
+
+    print("\n6) Hook：场景更新后自动翻译")
+    state.db["scene"].append({
+        "id": "99",
+        "title": "Freshly Scraped Scene",
+        "details": "Scraper just wrote this.",
+        "custom_fields": {},
+    })
+    code, result, _ = run_plugin(
+        state, port, {"mode": "hook"},
+        hook_context={"id": 99, "type": "Scene.Update.Post", "input": {}, "inputFields": ["title"]},
+    )
+    check("hook 返回 0", code == 0, str(code))
+    check("hook 已翻译新场景",
+          state.db["scene"][2]["title"].startswith("译文"),
+          state.db["scene"][2]["title"])
+    check("hook 输出可读", "场景" in (result.get("output") or ""), str(result))
+
+    print("\n7) Hook：不在范围内的实体应被忽略")
+    code, result, _ = run_plugin(
+        state, port, {"mode": "hook"},
+        hook_context={"id": 1, "type": "Image.Update.Post", "input": {}},
+    )
+    check("Image 钩子被忽略", "忽略" in (result.get("output") or ""), str(result))
+
+    print("\n8) 缓存命中：同文本不重复请求")
+    code, _, _ = run_plugin(state, port, {"mode": "clearcache"})
+    check("清缓存返回 0", code == 0, str(code))
+
+    # 先跑一次把缓存填上
+    state.db["scene"][0]["title"] = "Beautiful Nurse"
+    state.db["scene"][0]["custom_fields"] = {"tr_src_title": "Beautiful Nurse"}
+    run_plugin(state, port, {"mode": "scene"})
+    check("缓存已写入", os.path.exists(cache_file))
+
+    # 把字段改回英文，模拟「又需要翻译」，这次应命中缓存而不调引擎
+    state.db["scene"][0]["title"] = "Beautiful Nurse"
+    calls_before = engine.calls
+    code, result, _ = run_plugin(state, port, {"mode": "scene"})
+    check("缓存命中不再调引擎", engine.calls == calls_before,
+          "calls %d -> %d" % (calls_before, engine.calls))
+    check("缓存命中被统计", "命中缓存" in (result.get("output") or ""), str(result))
+
+    print("\n9) 回滚：还原原文并清理标记")
+    state.db["scene"][0]["title"] = "译文1"
+    state.db["scene"][0]["details"] = "译文2"
+    state.db["scene"][0]["custom_fields"] = {
+        "tr_src_title": "Beautiful Nurse",
+        "tr_engine_title": "edge",
+        "tr_src_details": "A story about a nurse.",
+        "tr_engine_details": "edge",
+    }
+    code, result, _ = run_plugin(state, port, {"mode": "rollback"})
+    check("回滚返回 0", code == 0, str(code))
+    check("标题已还原", state.db["scene"][0]["title"] == "Beautiful Nurse",
+          state.db["scene"][0]["title"])
+    check("简介已还原",
+          state.db["scene"][0]["details"] == "A story about a nurse.",
+          state.db["scene"][0]["details"])
+    check("标记键已清理", state.db["scene"][0]["custom_fields"] == {},
+          str(state.db["scene"][0]["custom_fields"]))
+
+    print("\n10) 含拉丁字母的译文：靠 tr_src 保护实现幂等")
+    latin_engine = StubEngine(with_latin=True)
+    install_stub(latin_engine)
+    state.db["scene"][1]["title"] = "Some English Title"
+    state.db["scene"][1]["custom_fields"] = {}
+    code, _, _ = run_plugin(state, port, {"mode": "scene"})
+    first = state.db["scene"][1]["title"]
+    check("含拉丁译文已写入", first.startswith("Chinese(") or first.startswith("译文"), first)
+    calls_before = latin_engine.calls
+    mutations_before = state.mutations
+    code, _, _ = run_plugin(state, port, {"mode": "scene"})
+    check("二次运行不再重复翻译", latin_engine.calls == calls_before,
+          "calls %d -> %d" % (calls_before, latin_engine.calls))
+    check("二次运行不再写库", state.mutations == mutations_before)
+
+    print("\n11) 引擎全部不可用时应优雅报错")
+    plugin.make_router = lambda settings: StubRouter(engine)
+    broken = StubEngine()
+    broken.translate_detailed = lambda *a, **k: (_ for _ in ()).throw(EngineError("全部挂了"))
+
+    class BrokenRouter(StubRouter):
+        def translate(self, text, source="auto", target="zh-CN"):
+            raise EngineError("所有引擎均失败 -> edge: 全部挂了")
+
+    plugin.make_router = lambda settings: BrokenRouter(broken)
+    state.db["performer"][0]["details"] = "needs translation"
+    code, result, err = run_plugin(state, port, {"mode": "performer"})
+    check("引擎故障时返回 0（任务不崩）", code == 0, str(code))
+    check("统计里记录了失败", "失败" in (result.get("output") or ""), str(result))
+
+    install_stub(engine)
+
+    server.shutdown()
+    if os.path.exists(cache_file):
+        os.remove(cache_file)
+
+    print("\n" + "=" * 60)
+    print("通过 %d 项，失败 %d 项" % (len(PASSED), len(FAILED)))
+    if FAILED:
+        for name in FAILED:
+            print("  失败: %s" % name)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

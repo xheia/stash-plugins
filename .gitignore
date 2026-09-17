@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.sqlite3
+*.log
+dist/
+.venv/
+venv/
+.idea/
+.vscode/
+.DS_Store
+translate-cache.sqlite3
