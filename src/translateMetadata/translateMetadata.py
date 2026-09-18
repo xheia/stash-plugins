@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import sys
 import traceback
+import urllib.request
 
 import cache as cache_mod
 import detect
@@ -335,11 +336,16 @@ def run_selftest(settings, router):
     if raw_proxy:
         fixed = normalize_proxy(raw_proxy)
         if fixed != raw_proxy:
-            log.warning("http_proxy：%s -> 已自动修正为 %s" % (raw_proxy, fixed))
+            log.warning("http_proxy（手动指定）：%s -> 已自动修正为 %s" % (raw_proxy, fixed))
         else:
-            log.info("http_proxy：%s" % fixed)
+            log.info("http_proxy（手动指定）：%s" % fixed)
     else:
-        log.info("http_proxy：未设置")
+        sys_proxies = urllib.request.getproxies() or {}
+        picked = sys_proxies.get("https") or sys_proxies.get("http")
+        if picked:
+            log.info("http_proxy：未手动设置，使用系统代理 %s" % picked)
+        else:
+            log.info("http_proxy：未设置，直连（无系统代理）")
     log.info("引擎优先级：%s" % " -> ".join(router.chain_names() or ["(无)"]))
     log.info("参数：超时 %ss，请求间隔 %sms，瞬时错误重试 %d 次，熔断阈值 %s"
              % (settings["timeout_s"], settings["rate_limit_ms"], settings["retry_times"],

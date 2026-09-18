@@ -111,37 +111,74 @@ ui:
 #   1 引擎选择  2 翻译范围  3 AI 翻译  4 各引擎凭证  5 网络与限流  6 批量与缓存
 # ---------------------------------------------------------------------------
 settings:
-  # ---------------- 1. 引擎选择 ----------------
+  # ===== ① 引擎选择 =====
   engine:
     displayName: 主翻译引擎
-    description: "可填：google / openai / deepl / tencent / alibaba / baidu /
-      edge / lingva / mymemory / libretranslate。
-      免费无需注册：google、mymemory、edge（免认证但大陆网络常被重置，
-      能否用取决于部署机的代理路径，建议先跑「测试翻译引擎」验证）。
-      lingva 公共实例大多已被 Cloudflare 拦截，除非自托管否则不建议选。"
+    description: "可填 openai / deepl / tencent / alibaba / baidu / google /
+      mymemory / libretranslate / edge / lingva。免注册：google、mymemory。
+      AI 引擎 openai 质量最好；lingva 公共实例已死，仅自托管可用"
     type: STRING
 
   engine_fallback:
-    description: 主引擎失败时按顺序尝试，英文逗号分隔。
-      例如接了 AI 翻译时填 tencent,alibaba,lingva：AI 挂了走腾讯，再挂走阿里，
-      最后走免费镜像。留空表示不回退
     displayName: 回退引擎链
+    description: 主引擎失败时按顺序尝试，英文逗号分隔，如 tencent,alibaba,mymemory
     type: STRING
 
-  target_lang:
-    displayName: 目标语言
-    description: "默认 zh-CN（简体中文），可填 zh-TW / en / ja 等"
-    type: STRING
-
+  # ===== ② 明细参数（所有引擎共用）=====
   source_lang:
     displayName: 源语言
     description: 默认 auto 自动检测
     type: STRING
 
-  # ---------------- 2. 翻译范围与行为 ----------------
+  target_lang:
+    displayName: 目标语言
+    description: 默认 zh-CN（简体），可填 zh-TW / en / ja 等
+    type: STRING
+
+  batch_size:
+    displayName: 每页条数
+    description: 批量任务每次从数据库取多少条，默认 100
+    type: NUMBER
+
+  max_items:
+    displayName: 单次实际翻译上限
+    description: 只统计真正翻译的记录；已翻译的跳过不占名额，0 = 不限
+    type: NUMBER
+
+  rate_limit_ms:
+    displayName: 请求间隔（毫秒）
+    description: 两次翻译请求之间的最小间隔，防止打爆接口，默认 300
+    type: NUMBER
+
+  timeout_s:
+    displayName: 请求超时（秒）
+    description: 默认 20，AI 引擎建议 120
+    type: NUMBER
+
+  retry_times:
+    displayName: 瞬时错误重试次数
+    description: 仅对 429 限流与 5xx 重试，默认 1，填 0 不重试
+    type: NUMBER
+
+  retry_backoff_ms:
+    displayName: 重试等待（毫秒）
+    description: 默认 800，按重试次数递增
+    type: NUMBER
+
+  # ===== ③ 翻译范围 =====
+  translate_title:
+    displayName: 翻译标题 / 名称
+    description: 场景标题、演员姓名、工作室名称、标签名称
+    type: BOOLEAN
+
+  translate_details:
+    displayName: 翻译简介
+    description: 场景简介、演员简介、工作室简介、标签描述
+    type: BOOLEAN
+
   auto_scene:
     displayName: 自动翻译 - 场景
-    description: 场景创建或更新时自动翻译
+    description: 场景创建或更新时自动翻译（含刮削器 / 识别写入）
     type: BOOLEAN
 
   auto_performer:
@@ -154,118 +191,89 @@ settings:
 
   auto_tag:
     displayName: 自动翻译 - 标签
-    description: 标签是全局共享的，开启前请先看 tag_name_mode 的说明
-    type: BOOLEAN
-
-  translate_title:
-    displayName: 翻译标题 / 名称字段
-    description: 场景标题、演员姓名、工作室名称、标签名称
-    type: BOOLEAN
-
-  translate_details:
-    displayName: 翻译简介字段
-    description: 场景简介、演员简介、工作室简介、标签描述
+    description: 标签全局共享，开启前先看下方「标签名称处理方式」
     type: BOOLEAN
 
   translate_names:
-    displayName: 允许翻译人名类字段
-    description: 演员姓名属于专有名词，默认关闭；工作室与标签名称不受此项影响
+    displayName: 允许翻译人名
+    description: 演员姓名属专有名词，默认关闭
     type: BOOLEAN
 
   tag_name_mode:
     displayName: 标签名称处理方式
-    description: "alias = 保留原名并追加中文别名（默认，可逆）；rename = 直接把标签改名"
+    description: "alias = 保留原名并追加中文别名（默认，可逆）；rename = 直接改名"
     type: STRING
 
+  # ===== ④ 内容识别 =====
   skip_existing:
     displayName: 跳过已是中文的内容
-    description: 开启后，含中文的文本不再翻译，这也是自动翻译不会死循环的关键
+    description: 幂等与防死循环的关键，保持开启
     type: BOOLEAN
 
   ambiguous_cjk:
-    displayName: 纯汉字（可能是日文）的处理
-    description: "skip = 当作中文跳过（默认）；detect = 调用引擎检测语言，日文才翻译"
+    displayName: 纯汉字（可能是日文）处理
+    description: "skip = 当中文跳过（默认）；detect = 交给引擎检测，日文才翻译"
     type: STRING
 
   keep_original:
     displayName: 保留原文以便回滚
-    description: 译文写入的同时把原文存进 custom_fields，可用「回滚翻译」任务撤销
+    description: 原文存入 custom_fields，可用「回滚翻译」任务撤销
     type: BOOLEAN
 
-  # ---------------- 3. AI 翻译（OpenAI 兼容）----------------
+  # ===== ⑤ AI 翻译（OpenAI 兼容）=====
   openai_base_url:
-    displayName: AI 翻译 - 接口地址
-    description: "任意 OpenAI 兼容端点。常用：OpenAI 填 https://api.openai.com（/v1 自动补）；
-      DeepSeek 填 https://api.deepseek.com；Ollama 填 http://localhost:11434；
-      LM Studio 填 http://localhost:1234/v1；智谱填 https://open.bigmodel.cn/api/paas/v4"
+    displayName: AI - 接口地址
+    description: "如 https://api.deepseek.com 或 http://localhost:11434（Ollama）"
     type: STRING
 
   openai_api_key:
-    displayName: AI 翻译 - API Key
-    description: 云端服务必填；Ollama / LM Studio 等本地服务留空
+    displayName: AI - KEY
+    description: Ollama / LM Studio 本地端点可留空
     type: STRING
 
   openai_model:
-    displayName: AI 翻译 - 模型名
-    description: "如 gpt-4o-mini / deepseek-chat / glm-4-flash / qwen2.5:7b。
-      留空默认 gpt-4o-mini"
+    displayName: AI - 模型名
+    description: 如 deepseek-chat
     type: STRING
 
   openai_prompt:
-    displayName: AI 翻译 - 自定义系统提示词
-    description: 高级选项，默认留空即可。内置提示词已要求只返回译文、保留编号与专有名词；
-      对译文风格不满意时可在此覆盖
+    displayName: AI - 提示词
+    description: 可自定义系统提示词，留空用内置
     type: STRING
 
-  # ---------------- 4. 各引擎凭证 ----------------
-  baidu_appid:
-    displayName: 百度 - AppID
-    description: fanyi-api.baidu.com 免费注册，标准版免费额度即可
-    type: STRING
-
-  baidu_key:
-    displayName: 百度 - 密钥
-    type: STRING
-
+  # ===== ⑥ 翻译服务凭证（统一 ID / KEY）=====
   tencent_secret_id:
-    displayName: 腾讯云 - SecretId
-    description: console.cloud.tencent.com/capi 开具；机器翻译每月 500 万字符免费
+    displayName: 腾讯云 - ID
+    description: SecretId
     type: STRING
 
   tencent_secret_key:
-    displayName: 腾讯云 - SecretKey
-    type: STRING
-
-  tencent_region:
-    displayName: 腾讯云 - 地域
-    description: 默认 ap-guangzhou。填接口地址（https://tmt.tencentcloudapi.com）或
-      tmt.ap-guangzhou.tencentcloudapi.com 也能识别
+    displayName: 腾讯云 - KEY
+    description: SecretKey
     type: STRING
 
   alibaba_access_key:
-    displayName: 阿里云 - AccessKey ID
-    description: RAM 用户的 AccessKeyId。注意：还需在阿里云控制台「开通机器翻译服务」，
-      否则会报 InvalidAccountStatus 账号没有开通服务
+    displayName: 阿里云 - ID
+    description: AccessKey ID，需在控制台开通机器翻译服务
     type: STRING
 
   alibaba_access_secret:
-    displayName: 阿里云 - AccessKey Secret
+    displayName: 阿里云 - KEY
+    description: AccessKey Secret
     type: STRING
 
-  alibaba_region:
-    displayName: 阿里云 - 接入地址
-    description: 默认 mt.aliyuncs.com；也可填 https://mt.cn-hangzhou.aliyuncs.com 或 cn-hangzhou
+  baidu_appid:
+    displayName: 百度翻译 - ID
+    description: AppID
+    type: STRING
+
+  baidu_key:
+    displayName: 百度翻译 - KEY
     type: STRING
 
   deepl_api_key:
-    displayName: DeepL - API Key
-    description: deepl.com 免费注册（免费档 Key 以 :fx 结尾，每月 50 万字符）
-    type: STRING
-
-  deepl_api_url:
-    displayName: DeepL - 接口地址
-    description: 留空按 Key 自动选择免费/专业档；也可手动填
-      https://api-free.deepl.com/v2 或 https://api.deepl.com/v2
+    displayName: DeepL - KEY
+    description: 免费档 Key 以 :fx 结尾
     type: STRING
 
   libretranslate_url:
@@ -274,68 +282,8 @@ settings:
     type: STRING
 
   libretranslate_api_key:
-    displayName: LibreTranslate - API Key
-    description: 自托管未开启鉴权时留空
+    displayName: LibreTranslate - KEY
+    description: 自托管未开鉴权时留空
     type: STRING
 
-  lingva_instance:
-    displayName: Lingva - 实例地址
-    description: "Google 免费镜像。⚠️ 2026-09 实测公共实例基本全死：
-      lingva.ml 被 Cloudflare 人机验证拦截（403），lunar.icu / esmailelbob.xyz 已下线。
-      仅自托管或确认可用的社区实例才填这里，否则建议直接换 google / edge / mymemory"
     type: STRING
-
-  mymemory_email:
-    displayName: MyMemory - 邮箱（可选）
-    description: 匿名即可用（约 1000 词/天）；填任意邮箱可提升到约 5 万词/天
-    type: STRING
-
-  # ---------------- 5. 网络与限流 ----------------
-  http_proxy:
-    displayName: HTTP 代理
-    description: 可选。国内直连 Google 不通时填写，例如 http://192.168.3.2:7890。
-      也可以只写 192.168.3.2:7890。填了代理后，内网地址（如自托管 LibreTranslate）会自动直连。
-      注意：只支持 HTTP 代理，不支持 socks5://
-    type: STRING
-
-  timeout_s:
-    displayName: 单个请求超时（秒）
-    description: 默认 20；用 AI 翻译（尤其本地大模型）建议 120 以上
-    type: NUMBER
-
-  rate_limit_ms:
-    displayName: 请求间隔（毫秒）
-    description: 两次翻译请求之间的最小间隔，防止打爆接口，默认 300
-    type: NUMBER
-
-  retry_times:
-    displayName: 瞬时错误重试次数
-    description: 仅对 429 限流与 5xx 服务端错误重试，默认 1；填 0 表示不重试
-    type: NUMBER
-
-  retry_backoff_ms:
-    displayName: 重试等待（毫秒）
-    description: 默认 800，按次数递增
-    type: NUMBER
-
-  engine_skip_after:
-    displayName: 引擎熔断阈值
-    description: 某引擎连续失败达到该次数后，本轮任务不再尝试它，避免上百条数据反复空等。
-      默认 3，填 0 表示关闭熔断
-    type: NUMBER
-
-  # ---------------- 6. 批量与缓存 ----------------
-  batch_size:
-    displayName: 批量任务每页条数
-    type: NUMBER
-
-  max_items:
-    displayName: 单次任务实际翻译上限
-    description: 只统计真正翻译的记录数；已是中文 / 已翻译过的记录会被跳过且不占名额，任务会继续向后扫描。0 表示不限制
-    type: NUMBER
-
-  cache_enabled:
-    displayName: 启用本地翻译缓存
-    description: 相同文本只请求一次接口，可显著减少额度消耗；
-      缓存里的退化译文会被自动识别、删除并重新翻译
-    type: BOOLEAN

@@ -179,7 +179,7 @@ python3 build.py --check    # 只预览会打包哪些文件
 
 > **国内直连环境下真正免注册可用的是 `mymemory`**，配 `openai`（接 DeepSeek / 智谱等国产 API）质量最好。  
 > Google 的免费端点 `translate.googleapis.com` 在国内不通，且对出口 IP 限流很凶（HTTP 429）。  
-> 有代理的话把地址填进 `http_proxy`。
+> 代理无需在插件里配置——不手动设置时自动使用**系统代理**（环境变量 `HTTP_PROXY`/`HTTPS_PROXY`，Docker 容器里即容器环境变量）。
 >
 > **公共 LibreTranslate 实例基本都已要求 API Key**，建议自托管：
 >
@@ -216,8 +216,8 @@ engine_fallback: alibaba,mymemory
 ```
 engine:          google
 engine_fallback: tencent,alibaba
-http_proxy:      http://192.168.3.2:7890
 ```
+> 代理走系统配置：给容器加环境变量 `HTTPS_PROXY=http://192.168.3.2:7890` 即可，无需在插件里填。
 
 **完全零成本** → 主引擎 `mymemory`，回退 `google`（需代理）
 
@@ -296,7 +296,7 @@ libretranslate_url: http://192.168.x.x:5000
 | `batch_size`        | `100`    | 批量任务每页条数                                                         |
 | `max_items`         | `0`      | 单次任务**实际翻译**上限；已翻译/已是中文的记录跳过不占名额，0 = 不限         |
 | `cache_enabled`     | 开        | 相同文本只请求一次接口                                                      |
-| `http_proxy`        | 空        | 走 Google 时需要。`http://192.168.3.2:7890` 或只写 `192.168.3.2:7890` 都认 |
+| `http_proxy`        | 空        | **已从设置页收起**：留空即使用系统代理（环境变量 `HTTP_PROXY`/`HTTPS_PROXY`）；如需临时手动指定仍可经任务参数传入 |
 
 
 凭证类（不填则对应引擎不可用，会自动从引擎链里剔除）：

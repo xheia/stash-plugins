@@ -176,7 +176,13 @@ def main():
     print("\n6) 与 Python 侧的默认值对齐")
     sys.path.insert(0, os.path.join(ROOT, "src", PLUGIN_ID))
     from config import DEFAULTS  # noqa: E402
-    missing = sorted(set(DEFAULTS) - set(settings))
+    # v1.2.4 起部分高级微调项不再出现在设置页（仍按内置默认值生效）
+    hidden_from_ui = {
+        "engine_skip_after", "cache_enabled", "lingva_instance",
+        "mymemory_email", "tencent_region", "alibaba_region",
+        "http_proxy", "deepl_api_url",
+    }
+    missing = sorted(set(DEFAULTS) - set(settings) - hidden_from_ui)
     check("DEFAULTS 里的键都在清单里声明", not missing, "未声明: %s" % missing)
     extra = sorted(set(settings) - set(DEFAULTS))
     check("清单里没有 DEFAULTS 之外的键", not extra, "多余: %s" % extra)
