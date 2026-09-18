@@ -20,11 +20,12 @@ import cache as cache_mod
 import detect
 import fields
 import log
-from config import load_settings, cache_path, describe_engine_chain
+from config import (load_settings, cache_path, describe_engine_chain,
+                    initialize_default_settings)
 from engines import EngineError, Router, normalize_proxy
 from stash_api import StashAPI, StashError
 
-VERSION = "1.2.7"
+VERSION = "1.2.8"
 
 # hook 类型前缀 -> 实体名
 _HOOK_ENTITY = {
@@ -469,6 +470,14 @@ def main():
         from config import Settings
         settings = Settings()
 
+    # 默认值初始化：设置项清单声明不了默认值，没填过的键在设置页显示为空
+    # （NUMBER 渲染成 0，像"默认值没生效"）。这里把默认值补写进插件配置，
+    # UI 上就能看到、也能直接改。只补空缺，绝不覆盖用户已填的值；失败不影响任务。
+    try:
+        initialize_default_settings(api, log)
+    except Exception as exc:
+        log.debug("默认值初始化失败（不影响本次任务）：%s" % exc)
+
     # 清缓存不需要引擎
     if mode == "clearcache":
         c = make_cache(settings, server_connection)
@@ -485,6 +494,10 @@ def main():
     try:
         if hook_context:
             result = run_hook(api, settings, router, cache, hook_context)
+        elif mode == "initdefaults":
+            seeded = initialize_default_settings(api, log)
+            result = ("设置页默认值已就绪，无需写入（全部键都有值）" if not seeded
+                      else "已写入 %d 项默认值：%s" % (len(seeded), ", ".join(sorted(seeded))))
         elif mode == "selftest":
             result = run_selftest(settings, router)
         elif mode == "rollback":

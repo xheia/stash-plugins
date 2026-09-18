@@ -641,6 +641,92 @@ def main():
     state.settings["max_items"] = "0"
     state.settings["batch_size"] = "100"
 
+    # ------------------------------------------------------------------ #
+    print("\n14) 默认值初始化：空缺的键补写进设置页（v1.2.8）")
+    # 背景：Stash 插件清单声明不了设置项默认值，没填过的键在设置页显示为空
+    # （NUMBER 渲染成 0）。v1.2.8 起用 configurePlugin 把默认值补写进去，
+    # UI 上就能看到真实默认值。关键约束：只补空缺，绝不覆盖用户已填的值；
+    # configurePlugin 是整体替换语义，必须先读全量再合并写回。
+
+    class FakeConfigApi:
+        """既会答 configuration 查询、也会记 configurePlugin 写入的假接口。"""
+
+        def __init__(self, stored):
+            self.stored = dict(stored)
+            self.mutations = []
+
+        def call(self, query, variables=None):
+            if "mutation" in query:
+                self.mutations.append(dict(variables or {}))
+                # 整体替换语义：input 就是插件配置的新全量
+                self.stored = dict(variables["input"])
+                return {"configurePlugin": self.stored}
+            return {"configuration": {"plugins": {config_mod.PLUGIN_ID: self.stored}}}
+
+    # 全空配置（带一个旧版兼容键）→ 补种全部 INIT 键，且写回保住旧键
+    api = FakeConfigApi({"skip_existing": "false"})
+    seeded = config_mod.initialize_default_settings(api)
+    check("空配置时补种了一整批默认值", len(seeded) >= 15, str(sorted(seeded)))
+    check("引擎链默认值被种进去",
+          seeded.get("engine_fallback") == ",".join(config_mod.DEFAULT_ENGINE_CHAIN),
+          seeded.get("engine_fallback"))
+    check("请求间隔默认 300", seeded.get("rate_limit_ms") == "300", str(seeded.get("rate_limit_ms")))
+    check("接口地址取自引擎类的官方地址",
+          seeded.get("google_url") == "https://translate.googleapis.com/translate_a/single",
+          seeded.get("google_url"))
+    check("布尔默认值是真布尔（前端复选框对字符串 false 按真值渲染）",
+          seeded.get("keep_original") is True and seeded.get("translate_names") is False,
+          "%r / %r" % (seeded.get("keep_original"), seeded.get("translate_names")))
+    check("凭证类键不种（空着就该空着）",
+          not any(k in seeded for k in ("baidu_appid", "openai_api_key", "http_proxy")),
+          str(sorted(seeded)))
+    # 写回的 input 是「raw 全量 + 种子」，旧版兼容键不能丢
+    written = api.mutations[0]["input"]
+    check("写回时保留了 raw 里的旧版键",
+          written.get("skip_existing") == "false",
+          str({k: written.get(k) for k in ("skip_existing",)}))
+
+    # 已填的值绝不能被覆盖（raw 里再放一个旧版主引擎键，验证全量合并）
+    api2 = FakeConfigApi({"engine_fallback": "deepl", "rate_limit_ms": "999",
+                          "keep_original": False, "engine": "google"})
+    seeded2 = config_mod.initialize_default_settings(api2)
+    check("用户已填的键不会被补种",
+          "engine_fallback" not in seeded2 and "rate_limit_ms" not in seeded2
+          and "keep_original" not in seeded2, str(sorted(seeded2)))
+    # 但其它空缺键仍会补，且写回保住了这三个已填的值
+    written2 = api2.mutations[0]["input"]
+    check("整体替换写回时保住了用户已填的值",
+          written2.get("engine_fallback") == "deepl" and written2.get("rate_limit_ms") == "999"
+          and written2.get("keep_original") is False, str(written2.get("rate_limit_ms")))
+    check("写回后也带上了旧版兼容键（raw 全量合并）",
+          written2.get("engine") == "google",
+          str(written2.get("engine")))
+
+    # 旧版「主翻译引擎」还在生效时，引擎链不能被默认链顶掉
+    api3 = FakeConfigApi({"engine": "deepl"})
+    seeded3 = config_mod.initialize_default_settings(api3)
+    check("旧主引擎键生效时不种引擎链", "engine_fallback" not in seeded3, str(sorted(seeded3)))
+    check("但其余空缺键照常补种", "rate_limit_ms" in seeded3, str(sorted(seeded3)))
+
+    # 全部键都有值 → 不发起任何写请求
+    api4 = FakeConfigApi(dict(config_mod.missing_init_seeds({})))
+    seeded4 = config_mod.initialize_default_settings(api4)
+    check("无空缺时不发起 configurePlugin", seeded4 == {} and not api4.mutations,
+          str(seeded4))
+
+    # 配置读不到（接口异常）→ 静默放弃，不影响任务
+    class BoomApi:
+        def call(self, query, variables=None):
+            raise RuntimeError("configuration 查询失败")
+
+    seeded5 = config_mod.initialize_default_settings(BoomApi())
+    check("读不到配置时静默放弃", seeded5 == {}, str(seeded5))
+
+    # 补种之后再读设置：source 应是 settings（键都有了），引擎链与默认链一致
+    after = config_mod.load_settings(FakeConfigApi({}), {})
+    check("冒烟：空配置 load_settings 仍回默认链", after.engine_chain == list(config_mod.DEFAULT_ENGINE_CHAIN),
+          str(after.engine_chain))
+
     server.shutdown()
     if os.path.exists(cache_file):
         os.remove(cache_file)

@@ -12,10 +12,10 @@ name: Metadata Translator
 description: >-
   把场景 / 演员 / 工作室 / 标签的标题与简介自动翻译成中文。
   支持 AI 翻译（OpenAI 兼容，可接 DeepSeek / Ollama / 智谱等）、Google、DeepL、
-  百度、腾讯云、阿里云、Lingva、MyMemory、LibreTranslate、EDGE 免认证接口，
+  百度、腾讯云、阿里云、MyMemory、LibreTranslate、EDGE 免认证接口，
   可配置优先级与失败回退；刮削（场景创建 / 更新）时自动触发，也可在任务页手动批量执行；
   翻译完成后详情页自动刷新显示译文。
-version: 1.2.7
+version: 1.2.8
 url: https://github.com/xheia/stash-plugins
 
 exec:
@@ -73,6 +73,11 @@ tasks:
     defaultArgs:
       mode: selftest
 
+  - name: 初始化默认配置
+    description: 把各项默认值（引擎链、请求间隔、接口地址等）补写进设置页；只补空缺，不覆盖已填的值
+    defaultArgs:
+      mode: initdefaults
+
   - name: 回滚翻译（恢复原文）
     description: 从 custom_fields 里取回翻译前的原文并写回，撤销本插件的翻译
     defaultArgs:
@@ -129,7 +134,7 @@ settings:
       留空即用内置默认链：tencent,alibaba,baidu,deepl,openai,mymemory,google。
       没配凭证的引擎会被自动跳过，不会浪费请求。
       可填：openai / deepl / tencent / alibaba / baidu / google / mymemory /
-      libretranslate / edge / lingva（openai 质量最好；lingva 公共实例已死，仅自托管可用）"
+      libretranslate / edge（openai 质量最好）"
     type: STRING
 
   # ===== ② 翻译参数（所有引擎共用）=====
@@ -301,11 +306,6 @@ settings:
   deepl_api_url:
     displayName: DeepL - 接口地址
     description: 留空按 Key 档位自动选 api-free.deepl.com / api.deepl.com
-    type: STRING
-
-  lingva_instance:
-    displayName: Lingva - 实例地址
-    description: 公共实例基本全死，要用得填自托管实例（如 http://192.168.3.5:3000）
     type: STRING
 
   libretranslate_url:

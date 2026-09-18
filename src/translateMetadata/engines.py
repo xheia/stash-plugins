@@ -35,15 +35,15 @@ class EngineError(Exception):
 # 各引擎自己的写法在这里翻译。
 # --------------------------------------------------------------------------- #
 LANG_MAP = {
-    "zh-CN": {"edge": "zh-Hans", "google": "zh-CN", "baidu": "zh", "tencent": "zh", "alibaba": "zh", "libretranslate": "zh", "deepl": "ZH", "mymemory": "zh-CN", "lingva": "zh", "openai": "zh-CN"},
-    "zh": {"edge": "zh-Hans", "google": "zh-CN", "baidu": "zh", "tencent": "zh", "alibaba": "zh", "libretranslate": "zh", "deepl": "ZH", "mymemory": "zh-CN", "lingva": "zh", "openai": "zh-CN"},
-    "zh-Hans": {"edge": "zh-Hans", "google": "zh-CN", "baidu": "zh", "tencent": "zh", "alibaba": "zh", "libretranslate": "zh", "deepl": "ZH", "mymemory": "zh-CN", "lingva": "zh", "openai": "zh-CN"},
-    "zh-TW": {"edge": "zh-Hant", "google": "zh-TW", "baidu": "cht", "tencent": "zh-TW", "alibaba": "zh-tw", "libretranslate": "zt", "deepl": "ZH", "mymemory": "zh-TW", "lingva": "zh_HANT", "openai": "zh-TW"},
-    "zh-Hant": {"edge": "zh-Hant", "google": "zh-TW", "baidu": "cht", "tencent": "zh-TW", "alibaba": "zh-tw", "libretranslate": "zt", "deepl": "ZH", "mymemory": "zh-TW", "lingva": "zh_HANT", "openai": "zh-TW"},
-    "en": {"edge": "en", "google": "en", "baidu": "en", "tencent": "en", "alibaba": "en", "libretranslate": "en", "deepl": "EN", "mymemory": "en", "lingva": "en", "openai": "en"},
-    "ja": {"edge": "ja", "google": "ja", "baidu": "jp", "tencent": "ja", "alibaba": "ja", "libretranslate": "ja", "deepl": "JA", "mymemory": "ja", "lingva": "ja", "openai": "ja"},
-    "ko": {"edge": "ko", "google": "ko", "baidu": "kor", "tencent": "ko", "alibaba": "ko", "libretranslate": "ko", "deepl": "KO", "mymemory": "ko", "lingva": "ko", "openai": "ko"},
-    "ru": {"edge": "ru", "google": "ru", "baidu": "ru", "tencent": "ru", "alibaba": "ru", "libretranslate": "ru", "deepl": "RU", "mymemory": "ru", "lingva": "ru", "openai": "ru"},
+    "zh-CN": {"edge": "zh-Hans", "google": "zh-CN", "baidu": "zh", "tencent": "zh", "alibaba": "zh", "libretranslate": "zh", "deepl": "ZH", "mymemory": "zh-CN", "openai": "zh-CN"},
+    "zh": {"edge": "zh-Hans", "google": "zh-CN", "baidu": "zh", "tencent": "zh", "alibaba": "zh", "libretranslate": "zh", "deepl": "ZH", "mymemory": "zh-CN", "openai": "zh-CN"},
+    "zh-Hans": {"edge": "zh-Hans", "google": "zh-CN", "baidu": "zh", "tencent": "zh", "alibaba": "zh", "libretranslate": "zh", "deepl": "ZH", "mymemory": "zh-CN", "openai": "zh-CN"},
+    "zh-TW": {"edge": "zh-Hant", "google": "zh-TW", "baidu": "cht", "tencent": "zh-TW", "alibaba": "zh-tw", "libretranslate": "zt", "deepl": "ZH", "mymemory": "zh-TW", "openai": "zh-TW"},
+    "zh-Hant": {"edge": "zh-Hant", "google": "zh-TW", "baidu": "cht", "tencent": "zh-TW", "alibaba": "zh-tw", "libretranslate": "zt", "deepl": "ZH", "mymemory": "zh-TW", "openai": "zh-TW"},
+    "en": {"edge": "en", "google": "en", "baidu": "en", "tencent": "en", "alibaba": "en", "libretranslate": "en", "deepl": "EN", "mymemory": "en", "openai": "en"},
+    "ja": {"edge": "ja", "google": "ja", "baidu": "jp", "tencent": "ja", "alibaba": "ja", "libretranslate": "ja", "deepl": "JA", "mymemory": "ja", "openai": "ja"},
+    "ko": {"edge": "ko", "google": "ko", "baidu": "kor", "tencent": "ko", "alibaba": "ko", "libretranslate": "ko", "deepl": "KO", "mymemory": "ko", "openai": "ko"},
+    "ru": {"edge": "ru", "google": "ru", "baidu": "ru", "tencent": "ru", "alibaba": "ru", "libretranslate": "ru", "deepl": "RU", "mymemory": "ru", "openai": "ru"},
 }
 
 # 引擎返回的语言里，哪些算「中文」——用于丢弃「其实原文就是中文」的翻译结果
@@ -955,62 +955,7 @@ class MyMemoryEngine(BaseEngine):
 
 
 # --------------------------------------------------------------------------- #
-# 9. Lingva —— Google 翻译的开源前端镜像，无需 Key
-#    ⚠️ 2026-09 实测：所有公共实例基本已死（本机与部署机两侧验证）——
-#       lingva.ml / translate.plausibility.cloud 被 Cloudflare 盾拦截（403 Just a moment），
-#       lingva.lunar.icu / lingva.esmailelbob.xyz 404，lingva.garudalinux.org 时通时不通。
-#       引擎实现保留：自托管（docker run ghcr.io/tadashi-aikawa/lingva 之类镜像）
-#       或临时可用的社区实例仍可在 lingva_instance 里指定。链里放 lingva 时，
-#       公共实例失败会由熔断机制跳过，不会拖慢整体。
-# --------------------------------------------------------------------------- #
-class LingvaEngine(BaseEngine):
-    name = "lingva"
-    UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-          "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
-
-    def __init__(self, options=None):
-        super().__init__(options)
-        options = options or {}
-        base = (options.get("lingva_instance") or "https://lingva.ml").strip().rstrip("/")
-        if base.endswith("/api"):
-            base = base[: -len("/api")]
-        self.base_url = base
-
-    def translate_detailed(self, text, source="auto", target="zh-CN"):
-        source_lang = self.lang(source) if source and source != "auto" else "auto"
-        url = "%s/api/v1/%s/%s/%s" % (
-            self.base_url, source_lang, self.lang(target), urllib.parse.quote(text, safe=""),
-        )
-        self._throttle()
-        status, raw = http_request(
-            url,
-            headers={"Accept": "application/json", "User-Agent": self.UA},
-            timeout=self.timeout,
-            proxy=self.proxy,
-            retries=self.retries,
-            backoff_ms=self.backoff_ms,
-        )
-        body = raw.decode("utf-8", "replace")
-        if status == 403 and ("Just a moment" in body or "cloudflare" in body.lower()):
-            raise EngineError(
-                "实例 %s 被 Cloudflare 人机验证拦截（403），浏览器都过不去、程序更不行。"
-                "公共 Lingva 实例大多已死，请在 lingva_instance 里换自托管或临时可用的社区实例，"
-                "或直接换 google / edge / mymemory 引擎" % self.base_url
-            )
-        try:
-            data = json.loads(body)
-        except ValueError as exc:
-            raise EngineError("Lingva 响应不是 JSON (HTTP %s): %s" % (status, body[:200],)) from exc
-
-        translated = data.get("translation")
-        if not translated:
-            raise EngineError("Lingva 未返回译文: %s" % (json.dumps(data, ensure_ascii=False)[:200],))
-        info = data.get("info") or {}
-        return translated, info.get("detectedSource")
-
-
-# --------------------------------------------------------------------------- #
-# 10. AI 翻译（OpenAI 兼容接口）—— 一个配置通吃所有兼容端点：
+# 9. AI 翻译（OpenAI 兼容接口）—— 一个配置通吃所有兼容端点：
 #     OpenAI / DeepSeek / 智谱 / Kimi / 通义 / OpenRouter / Ollama / LM Studio ...
 #     只要把「接口地址 + API Key + 模型名」填对即可。LLM 翻译质量通常
 #     远好于传统机翻，且能理解上下文、保留专有名词。
@@ -1131,7 +1076,6 @@ ENGINE_CLASSES = {
     LibreTranslateEngine.name: LibreTranslateEngine,
     DeepLEngine.name: DeepLEngine,
     MyMemoryEngine.name: MyMemoryEngine,
-    LingvaEngine.name: LingvaEngine,
     OpenAIEngine.name: OpenAIEngine,
 }
 
@@ -1144,14 +1088,8 @@ ENGINE_LABELS = {
     "libretranslate": "LibreTranslate",
     "deepl": "DeepL（免费档，需 API Key）",
     "mymemory": "MyMemory（匿名免费）",
-    "lingva": "Lingva（Google 免费镜像，公共实例大多被 Cloudflare 拦截）",
     "openai": "AI 翻译（OpenAI 兼容）",
 }
-
-# 默认链只留 Google —— 它不需要凭证、大陆网络下走代理即可用。
-# EDGE 免认证端点在大陆网络下常被重置（是否可用取决于部署机网络路径），不进默认链。
-DEFAULT_CHAIN = ["google"]
-
 
 class TranslateResult:
     """一次翻译的结果。"""

@@ -75,11 +75,10 @@ DEFAULTS = {
     "alibaba_region": "mt.aliyuncs.com",
     "libretranslate_url": "http://localhost:5000",
     "libretranslate_api_key": "",
-    # DeepL / MyMemory / Lingva
+    # DeepL / MyMemory
     "deepl_api_key": "",
     "deepl_api_url": "",
     "mymemory_email": "",
-    "lingva_instance": "https://lingva.ml",
     # AI 翻译（OpenAI 兼容）
     "openai_base_url": "",
     "openai_api_key": "",
@@ -279,7 +278,6 @@ class Settings:
             "deepl_api_key": to_str(self._values.get("deepl_api_key")),
             "deepl_api_url": to_str(self._values.get("deepl_api_url")),
             "mymemory_email": to_str(self._values.get("mymemory_email")),
-            "lingva_instance": to_str(self._values.get("lingva_instance"), "https://lingva.ml"),
             "openai_base_url": to_str(self._values.get("openai_base_url")),
             "openai_api_key": to_str(self._values.get("openai_api_key")),
             "openai_model": to_str(self._values.get("openai_model")),
@@ -424,6 +422,111 @@ def describe_engine_chain(settings):
     if legacy:
         return "设置页留空，沿用旧版「主翻译引擎」：%s" % legacy
     return "设置页留空，用内置默认：%s" % ",".join(DEFAULT_ENGINE_CHAIN)
+
+
+# --------------------------------------------------------------------------- #
+# 设置页默认值初始化
+#
+# Stash 的插件清单声明不了设置项的默认值（PluginSetting 只有 name/display_name/
+# description/type），所以设置页里没填过的键显示为空（NUMBER 甚至渲染成 0），
+# 看起来像"默认值没生效"。这里在服务端把默认值补写进插件配置（configurePlugin），
+# UI 上就能看到真实的默认值了。
+#
+# 规则：只补空缺（raw 里没有 / 空串 / None 的键），绝不覆盖用户已填的值。
+# configurePlugin 是整体替换语义（stash 源码 Config.set(PluginsSettingPrefix+id, v)），
+# 所以必须先读全量再合并写回，顺带保留 raw 里的旧版兼容键（engine 等）。
+# 注意 engine_fallback 只在「它自己空 且 旧版主引擎键也没有」时才补种子 ——
+# 否则老用户配置里的 engine 会被默认链悄悄顶掉。
+# --------------------------------------------------------------------------- #
+CONFIGURE_PLUGIN_MUTATION = """
+mutation ConfigurePlugin($plugin_id: ID!, $input: Map!) {
+  configurePlugin(plugin_id: $plugin_id, input: $input)
+}
+"""
+
+
+def _init_defaults():
+    """要种进设置页的默认值（只列「显示出来有意义」的键）。
+
+    NUMBER/STRING 以字符串写入（与设置页保存行为一致），BOOLEAN 用真布尔 ——
+    Stash 前端的复选框对字符串 "false" 也按真值渲染，传布尔才不会骗人。
+    接口地址从各引擎类的 API_URL 取，避免和 engines.py 双处维护。
+    凭证类（baidu/tencent/alibaba/openai 的 key）、隐藏键（engine_skip_after 等）
+    不种 —— 空着就该空着。
+    """
+    import engines
+
+    return {
+        # 引擎链：填默认链，让"当前用的什么链"在 UI 一眼可见、可改
+        "engine_fallback": ",".join(DEFAULT_ENGINE_CHAIN),
+        # 翻译参数
+        "source_lang": "auto",
+        "target_lang": "zh-CN",
+        "rate_limit_ms": "300",
+        "batch_size": "100",
+        # 范围开关
+        "auto_scene": True,
+        "auto_performer": True,
+        "auto_studio": True,
+        "auto_tag": True,
+        "translate_title": True,
+        "translate_details": True,
+        "translate_names": False,
+        "tag_name_mode": "alias",
+        # 内容识别
+        "skip_policy": "smart",
+        "keep_original": True,
+        # 接口地址（官方地址，想换镜像/反代时直接改这里）
+        "google_url": engines.GoogleEngine.API_URL,
+        "edge_url": engines.EdgeEngine.API_URL,
+        "baidu_url": engines.BaiduEngine.API_URL,
+        "tencent_url": "https://" + engines.TENCENT_DEFAULT_HOST,
+        "alibaba_url": "https://" + engines.AlibabaEngine.DEFAULT_HOST,
+        "mymemory_url": engines.MyMemoryEngine.API_URL,
+        "libretranslate_url": DEFAULTS["libretranslate_url"],
+        # AI
+        "openai_model": DEFAULTS["openai_model"],
+    }
+
+
+def missing_init_seeds(raw):
+    """算出需要补种的键：INIT 默认值里有、而 raw 里空缺的。"""
+    raw = raw or {}
+    seeds = {}
+    for key, value in _init_defaults().items():
+        if raw.get(key) in (None, ""):
+            seeds[key] = value
+    if "engine_fallback" in seeds and raw.get("engine") not in (None, ""):
+        # 旧版「主翻译引擎」还在生效中，不动引擎链，兼容逻辑继续走
+        del seeds["engine_fallback"]
+    return seeds
+
+
+def initialize_default_settings(api, log=None):
+    """把默认值补写进插件配置。返回实际写入的键值；无需写入时返回空 dict。
+
+    读不到配置（接口异常）就放弃 —— 初始化失败不该影响翻译任务本身。
+    """
+    try:
+        data = api.call(SETTINGS_QUERY, {"include": [PLUGIN_ID]})
+        raw = ((data.get("configuration") or {}).get("plugins") or {}).get(PLUGIN_ID) or {}
+    except Exception as exc:
+        if log:
+            log.debug("默认值初始化跳过：读不到插件配置（%s）" % exc)
+        return {}
+
+    seeds = missing_init_seeds(raw)
+    if not seeds:
+        return {}
+
+    merged = dict(raw)
+    merged.update(seeds)
+    api.call(CONFIGURE_PLUGIN_MUTATION,
+             {"plugin_id": PLUGIN_ID, "input": merged})
+    if log:
+        log.info("已把 %d 项默认值写入设置页（只补空缺，不覆盖已填的值）：%s"
+                 % (len(seeds), ", ".join(sorted(seeds))))
+    return seeds
 
 
 def cache_path(plugin_dir, server_dir=""):

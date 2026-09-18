@@ -633,53 +633,7 @@ engines.http_request = _real_http_request
 
 
 # --------------------------------------------------------------------------- #
-# 19. Lingva 引擎
-# --------------------------------------------------------------------------- #
-section("19) Lingva 引擎")
-
-check("Lingva zh-CN -> zh", engines.to_engine_lang("lingva", "zh-CN") == "zh")
-check("Lingva zh-TW -> zh_HANT", engines.to_engine_lang("lingva", "zh-TW") == "zh_HANT")
-
-lingva = engines.LingvaEngine({})
-check("默认实例 lingva.ml", lingva.base_url == "https://lingva.ml", lingva.base_url)
-lingva2 = engines.LingvaEngine({"lingva_instance": "https://lingva.lunar.icu/"})
-check("结尾斜杠被去掉", lingva2.base_url == "https://lingva.lunar.icu", lingva2.base_url)
-lingva3 = engines.LingvaEngine({"lingva_instance": "https://lingva.ml/api"})
-check("带 /api 后缀被剥离", lingva3.base_url == "https://lingva.ml", lingva3.base_url)
-
-engines.http_request = _stub_http(200, {"translation": "你好世界",
-                                        "info": {"detectedSource": "en"}})
-out = lingva.translate_detailed("Hello world", "auto", "zh-CN")
-check("Lingva 正常解析", out == ("你好世界", "en"), str(out))
-check("Lingva 请求路径正确", "/api/v1/auto/zh/Hello%20world" in engines.http_request.last_url,
-      engines.http_request.last_url)
-
-engines.http_request = _stub_http(200, {"error": "not found"})
-try:
-    lingva.translate_detailed("Hello")
-    check("Lingva 空译文应抛错", False)
-except engines.EngineError as exc:
-    check("Lingva 空译文报错", "未返回译文" in str(exc), str(exc))
-
-# Cloudflare 盾页（2026-09 公共实例实测的主要死法）
-_cf_html = "<html><head><title>Just a moment...</title></head><body>Checking your browser</body></html>".encode()
-def _cf_fake(url, method="GET", headers=None, data=None, timeout=20, proxy="", retries=0, backoff_ms=800):
-    _cf_fake.last_headers = dict(headers or {})
-    return 403, _cf_html
-engines.http_request = _cf_fake
-try:
-    lingva.translate_detailed("Hello")
-    check("Lingva CF 403 应抛错", False)
-except engines.EngineError as exc:
-    check("Lingva CF 403 给出明确诊断", "Cloudflare" in str(exc) and "lingva.ml" in str(exc), str(exc))
-check("Lingva 请求带浏览器 UA", "Mozilla/5.0" in _cf_fake.last_headers.get("User-Agent", ""),
-      str(_cf_fake.last_headers))
-
-engines.http_request = _real_http_request
-
-
-# --------------------------------------------------------------------------- #
-# 20. AI 翻译（OpenAI 兼容）引擎
+# 19. AI 翻译（OpenAI 兼容）引擎
 # --------------------------------------------------------------------------- #
 section("20) AI 翻译（OpenAI 兼容）引擎")
 

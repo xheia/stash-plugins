@@ -4,7 +4,7 @@
 
 ## Metadata Translator
 
-把 Stash 里的**标题与简介**自动翻译成中文。支持 **AI 翻译（OpenAI 兼容，可接 DeepSeek / Ollama / 智谱等）、Google、DeepL、腾讯云、阿里云、百度、Lingva、MyMemory、LibreTranslate、EDGE 免认证接口** 十种引擎，可配置优先级与失败自动回退。
+把 Stash 里的**标题与简介**自动翻译成中文。支持 **AI 翻译（OpenAI 兼容，可接 DeepSeek / Ollama / 智谱等）、Google、DeepL、腾讯云、阿里云、百度、MyMemory、LibreTranslate、EDGE 免认证接口** 九种引擎，可配置优先级与失败自动回退。
 
 覆盖四个实体：
 
@@ -18,7 +18,7 @@
 三种触发方式：
 
 1. **自动**——刮削器把元数据写进数据库时（`Scene.Create.Post` / `Scene.Update.Post` 等 8 个钩子）自动翻译
-2. **手动任务**——设置 → 任务 → 插件任务，9 个任务（批量翻译、干跑预览、测试引擎、回滚、清缓存等）
+2. **手动任务**——设置 → 任务 → 插件任务，10 个任务（批量翻译、干跑预览、测试引擎、初始化默认配置、回滚、清缓存等）
 3. **页面按钮**——顶部导航栏的「译」按钮，一键翻译当前打开页面的实体
 
 ---
@@ -67,7 +67,7 @@ python3 tests/test_pipeline.py
 | ------ | -------------------------------------------------------------------- |
 | Stash  | v0.31.x（在 v0.31.1 上开发与验证）                                            |
 | Python | 3.8+，**只需要标准库**，不需要 `pip install` 任何东西                               |
-| 网络     | 看所选引擎：国产云（腾讯 / 阿里 / 百度）与 lingva / mymemory 国内直连即可；google / deepl 需代理 |
+| 网络     | 看所选引擎：国产云（腾讯 / 阿里 / 百度）与 mymemory 国内直连即可；google / deepl 需代理 |
 
 ### 各部署环境对照
 
@@ -158,7 +158,6 @@ python3 build.py --check    # 只预览会打包哪些文件
 | `deepl`          | API Key（免费档以 `:fx` 结尾）        | 每月 50 万字符                    | **不通**（需代理）              | 好                   |
 | `libretranslate` | 视实例而定                         | 取决于自托管                       | 通                        | **一般**（可能吐出退化内容，见下） |
 | `google`         | 不需要                           | 无明确限制                        | **不通**（需代理）              | 好                   |
-| `lingva`         | 不需要                           | —                              | ❌ **公共实例基本全死**（见下）        | 好（Google 同源）        |
 | `mymemory`       | 不需要（可填邮箱提额）                   | 匿名约 1000 词/天；填邮箱约 5 万词/天     | 通                        | 一般；单次上限 500 字节      |
 | `edge`           | 不需要                           | —                            | **常被重置**                 | 好（微软同源）             |
 
@@ -229,10 +228,9 @@ engine_fallback: google,tencent,alibaba
 engine_fallback: mymemory,google
 ```
 
-> ⚠️ **Lingva 公共实例基本全死（2026-09 实测）**：`lingva.ml` 被 Cloudflare
-> 人机验证拦截（403 Just a moment），`lunar.icu` / `esmailelbob.xyz` 已下线，
-> `plausibility.cloud` 返回 500。只有自托管 Lingva 才建议启用该引擎；
-> 放进引擎链里也无妨——连续失败 3 次会被熔断跳过，不会拖慢任务。
+> ⚠️ **Lingva 引擎已移除（v1.2.8）**：公共实例在 2026-09 实测全部不可用
+> （Cloudflare 403 / 下线 / 500），引擎连同 `lingva_instance` 设置一并删除。
+> 以前靠它的请改用 `mymemory`（国内直连、匿名可用）或 `google`（需代理）。
 
 **只有自托管 LibreTranslate（零成本）**：
 
@@ -323,7 +321,6 @@ libretranslate_url: http://192.168.x.x:5000
 | `alibaba_url`       | `mt.aliyuncs.com`                          | 也可直接填 `cn-hangzhou` 这类地域                    |
 | `mymemory_url`      | `api.mymemory.translated.net/get`          | 一般不用改                                     |
 | `deepl_api_url`     | 按 Key 档位自动选 `api-free` / `api`             | 走代理或中转时用                                  |
-| `lingva_instance`   | `https://lingva.ml`                        | 公共实例基本全死，要用就填自托管实例                        |
 | `libretranslate_url` | `http://localhost:5000`                    | 该服务没有公共实例，必须填自托管地址                        |
 
 > 各引擎的**超时与重试**不在这里配：每个引擎自带默认值（机翻 20s / 重试 1 次 / 等待 800ms，
@@ -351,6 +348,7 @@ libretranslate_url: http://192.168.x.x:5000
 | 翻译 - 仅场景 / 演员 / 工作室 / 标签 | 只处理某一类                        |
 | 翻译 - 试跑 20 条（仅场景，不写回）    | 小批量试效果：`max_items` 经任务参数下发     |
 | 翻译 - 干跑预览（不写回）           | 先看译文效果，不碰数据库。**首次建议先跑这个**     |
+| 初始化默认配置                     | 把默认值（引擎链、请求间隔、接口地址等）补写进设置页，只补空缺不覆盖；每次任务/钩子运行时也会自动补一次 |
 | 测试翻译引擎                   | 逐个测连通性与耗时，排查凭证问题              |
 | 回滚翻译（恢复原文）               | 从 `custom_fields` 取回原文写回，撤销翻译 |
 | 清空翻译缓存                   | 删掉本地缓存，下次重新请求                 |
