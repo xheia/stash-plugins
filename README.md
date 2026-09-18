@@ -205,8 +205,8 @@ engine_fallback: openai,tencent,mymemory
 openai_base_url: https://api.deepseek.com        # 或 Ollama http://localhost:11434
 openai_api_key:  sk-xxx                          # Ollama / LM Studio 留空
 openai_model:    deepseek-chat                   # 或 glm-4-flash / qwen2.5:7b 等
-timeout_s:       120                             # LLM 比机翻慢，超时给够
 ```
+> 超时不用管：AI 引擎自带 120s 默认值（机翻 20s），不再占设置项。
 
 LLM 翻译对这类内容优势明显：能理解上下文、保留 `#456` 这类编号、人名处理更自然。
 
@@ -287,18 +287,19 @@ libretranslate_url: http://192.168.x.x:5000
 | `translate_details` | 开        | 翻译简介类字段                                                          |
 | `translate_names`   | **关**    | 是否翻译**演员姓名**（专有名词，默认不动）                                          |
 | `tag_name_mode`     | `alias`  | `alias` 保留标签原名并追加中文别名；`rename` 直接改名                              |
-| `skip_existing`     | 开        | 已是中文的文本跳过，这是自动翻译不死循环的关键                                          |
-| `ambiguous_cjk`     | `skip`   | 纯汉字文本（可能是日文）如何处理，见「已知限制」                                         |
+| `skip_policy`       | `smart`  | **跳过策略**（一个键管两件事）：`smart` 已是中文 / 纯汉字都跳过；`detect` 已是中文跳过、纯汉字交给引擎判断（日文才翻）；`none` 一律翻译。见「已知限制」 |
 | `keep_original`     | 开        | 把原文存进 `custom_fields`，可一键回滚                                      |
 | `rate_limit_ms`     | `300`    | 两次请求的最小间隔，防止触发限流                                                 |
-| `timeout_s`         | `20`     | 单个请求超时                                                           |
-| `retry_times`       | `1`      | 瞬时错误（429 限流 / 5xx）重试次数，0 = 不重试                                   |
-| `retry_backoff_ms`  | `800`    | 重试等待，按次数递增                                                       |
 | `engine_skip_after` | `3`      | 某引擎连续失败这么多次后，本轮不再试它（熔断）。0 = 关闭                                   |
 | `batch_size`        | `100`    | 批量任务每页条数                                                         |
-| `max_items`         | `0`      | 单次任务**实际翻译**上限；已翻译/已是中文的记录跳过不占名额，0 = 不限         |
 | `cache_enabled`     | 开        | 相同文本只请求一次接口                                                      |
 | `http_proxy`        | 空        | **已从设置页收起**：留空即使用系统代理（环境变量 `HTTP_PROXY`/`HTTPS_PROXY`）；如需临时手动指定仍可经任务参数传入 |
+
+> **v1.2.7 撤掉了「单次实际翻译上限 / 请求超时 / 瞬时错误重试次数 / 重试等待」四项设置。**
+> 超时与重试改由**各引擎自己的默认值**决定（机翻 20s、重试 1 次、等待 800ms；AI 120s），
+> 实测值会在「测试翻译引擎」任务的日志里逐条列出。需要临时收口时（例如先试跑一批），
+> 用 **「翻译 - 试跑 20 条」** 任务，或在自己加的任务里通过 `defaultArgs` 传
+> `max_items` / `timeout_s` / `retry_times` —— 这些键仍被支持，只是不再占设置页。
 
 
 凭证类（不填则对应引擎不可用，会自动从引擎链里剔除）：
@@ -307,8 +308,26 @@ libretranslate_url: http://192.168.x.x:5000
 | ----------------------------------------------- | -------------------------------------------------------- |
 | `baidu_appid` / `baidu_key`                     | 百度翻译的 AppID 与密钥                                          |
 | `tencent_secret_id` / `tencent_secret_key`      | 腾讯云密钥；`tencent_region` 默认 `ap-guangzhou`                 |
-| `alibaba_access_key` / `alibaba_access_secret`  | 阿里云 AccessKey；`alibaba_region` 默认 `mt.aliyuncs.com`      |
-| `libretranslate_url` / `libretranslate_api_key` | LibreTranslate 地址与 Key；`url` 填根地址或带 `/translate` 的接口地址都行 |
+| `alibaba_access_key` / `alibaba_access_secret`  | 阿里云 AccessKey                                             |
+| `deepl_api_key`                                 | DeepL Key（免费档以 `:fx` 结尾）                                  |
+| `libretranslate_api_key`                        | LibreTranslate Key；自托管未开鉴权时留空                            |
+
+接口地址类（**留空 = 用内置官方地址**，填了就用填的）：
+
+| 设置                  | 默认值                                        | 什么时候要填                                    |
+| ------------------- | ------------------------------------------ | ----------------------------------------- |
+| `google_url`        | `translate.googleapis.com/translate_a/single` | 国内直连不通，可指向自建反代 / 镜像                      |
+| `edge_url`          | `edge.microsoft.com/translate/translatetext` | 同上；该域名在大陆常被 RST                          |
+| `baidu_url`         | `fanyi-api.baidu.com/api/trans/vip/translate` | 一般不用改                                     |
+| `tencent_url`       | `tmt.tencentcloudapi.com`                  | 支持内网网关；填 `tmt.<地域>.tencentcloudapi.com` 会自动取地域 |
+| `alibaba_url`       | `mt.aliyuncs.com`                          | 也可直接填 `cn-hangzhou` 这类地域                    |
+| `mymemory_url`      | `api.mymemory.translated.net/get`          | 一般不用改                                     |
+| `deepl_api_url`     | 按 Key 档位自动选 `api-free` / `api`             | 走代理或中转时用                                  |
+| `lingva_instance`   | `https://lingva.ml`                        | 公共实例基本全死，要用就填自托管实例                        |
+| `libretranslate_url` | `http://localhost:5000`                    | 该服务没有公共实例，必须填自托管地址                        |
+
+> 各引擎的**超时与重试**不在这里配：每个引擎自带默认值（机翻 20s / 重试 1 次 / 等待 800ms，
+> AI 120s），想临时改动就用任务参数（见上一节 v1.2.7 的说明）。
 
 > **`tag_name_mode` 请重点看一下。** 标签是**全局共享**的，`rename` 会把标签直接改名，影响所有引用它的场景；`alias`（默认）只追加一个中文别名，原名不变、可逆，搜索时中英文都能命中。想要"全站标签都是中文"再改成 `rename`。
 
@@ -330,6 +349,7 @@ libretranslate_url: http://192.168.x.x:5000
 | ------------------------ | ----------------------------- |
 | 翻译 - 全部                  | 全库扫一遍四个实体                     |
 | 翻译 - 仅场景 / 演员 / 工作室 / 标签 | 只处理某一类                        |
+| 翻译 - 试跑 20 条（仅场景，不写回）    | 小批量试效果：`max_items` 经任务参数下发     |
 | 翻译 - 干跑预览（不写回）           | 先看译文效果，不碰数据库。**首次建议先跑这个**     |
 | 测试翻译引擎                   | 逐个测连通性与耗时，排查凭证问题              |
 | 回滚翻译（恢复原文）               | 从 `custom_fields` 取回原文写回，撤销翻译 |
@@ -345,7 +365,7 @@ libretranslate_url: http://192.168.x.x:5000
 
 ## 已知限制
 
-- **纯汉字且无假名的日文**（例如「痴漢電車」）会被当成中文跳过。绝大多数日文标题都带假名，所以影响有限。要处理这类，把 `ambiguous_cjk` 改成 `detect`——它会调用引擎判断语言，代价是每段纯汉字文本多花一次请求（有缓存兜底）。反过来，这会让你库里大量真正的中文内容也各多花一次请求，请按需取舍。
+- **纯汉字且无假名的日文**（例如「痴漢電車」）会被当成中文跳过。绝大多数日文标题都带假名，所以影响有限。要处理这类，把 `skip_policy` 改成 `detect`——它会调用引擎判断语言，代价是每段纯汉字文本多花一次请求（有缓存兜底）。反过来，这会让你库里大量真正的中文内容也各多花一次请求，请按需取舍。
 - **演员姓名默认不翻译**。英文人名翻成中文未必是你想要的，需要时打开 `translate_names`。
 - **标签改名不可逆**（`rename` 模式）。默认的 `alias` 模式是安全的。
 - **回滚只处理被覆盖写的字段**。`alias` 模式追加的别名不会被回滚任务移除（它没有覆盖任何东西，无害）。
@@ -408,7 +428,7 @@ Stash 找不到 Python。设置 → 系统 → 应用程序路径 → Python 可
 > 先确认请求参数齐全** —— 这是踩过一次坑的结论。
 
 **批量任务跑到一半提示失败**  
-多半是免费额度用尽或被限流。把 `rate_limit_ms` 调大（比如 1000），用 `max_items` 限制单次实际翻译量（跳过的已翻译记录不占名额，任务会自动向后扫描），分几次跑完。
+多半是免费额度用尽或被限流。把 `rate_limit_ms` 调大（比如 1000），用「翻译 - 试跑 20 条」这类任务分几次跑（`max_items` 只统计真正翻译的记录，已翻译的跳过不占名额，任务会自动向后扫描）。
 
 ---
 
@@ -424,6 +444,8 @@ Stash 找不到 Python。设置 → 系统 → 应用程序路径 → Python 可
 | GraphQL 类型名拼错             | `Unknown type "SUpdateInputcene"`，写回全线失效          | schema 契约测试 + 假服务入口校验                          |
 | 设置项里重复写同一个键（v1.2.4）       | 插件在列表里凭空消失，日志只有 `field type already set in type plugin.SettingConfig` | 清单/索引改走「重复键即报错」的严格 loader（PyYAML 默认会静默覆盖，才让它在本地全绿） |
 | 主引擎与回退链两处配置各说各话（v1.2.6 前） | 改了「主翻译引擎」却没生效，也看不出实际用的哪条链 | 合并成单项「翻译引擎链」（默认值写在代码里），自检日志打印引擎链来源 |
+| 超时 / 重试写死在一处（v1.2.7 前）  | 一个值不可能同时合适：AI 被 20s 卡死，机翻白等 120s | 改为**各引擎自带默认值**（机翻 20s / AI 120s），自检日志逐条列出；要临时改动走任务参数 |
+| 跳过中文与纯汉字拆成两个键（v1.2.7 前） | 两个键组合出四种状态，调起来容易顾此失彼 | 合并成单项 `skip_policy`（smart / detect / none），旧键自动换算 |
 
 
 

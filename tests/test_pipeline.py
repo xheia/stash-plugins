@@ -36,6 +36,7 @@ import fields  # noqa: E402
 import log  # noqa: E402
 import translateMetadata as plugin  # noqa: E402
 from config import Settings  # noqa: E402
+import engines as engines_mod  # noqa: E402
 from engines import EngineError, TranslateResult  # noqa: E402
 from stash_api import StashAPI  # noqa: E402
 
@@ -519,7 +520,21 @@ def main():
           str(blank.engine_chain))
     check("无任何设置时阿里云凭证为空",
           not blank.engine_options()["alibaba_access_key"])
-    check("默认开启瞬时错误重试", blank.engine_options()["retry_times"] == 1)
+    check("超时 / 重试不再由设置页下发（改由各引擎默认值兜底）",
+          "timeout_s" not in blank.engine_options()
+          and "retry_times" not in blank.engine_options()
+          and "retry_backoff_ms" not in blank.engine_options(),
+          str(sorted(blank.engine_options())))
+    check("机翻引擎默认 20s / 重试 1 次",
+          engines_mod.BaseEngine.default_timeout_s == 20
+          and engines_mod.BaseEngine.default_retry_times == 1)
+    check("AI 引擎默认超时更长（120s）",
+          engines_mod.OpenAIEngine.default_timeout_s == 120)
+    check("任务参数显式给了才下发超时 / 重试",
+          config_mod.load_settings(FakeApi({}), {"timeout_s": "45", "retry_times": "0"})
+          .engine_options().get("timeout_s") == 45
+          and config_mod.load_settings(FakeApi({}), {"retry_times": "0"})
+          .engine_options().get("retry_times") == 0)
     check("默认开启引擎熔断", blank.engine_options()["engine_skip_after"] == 3)
 
     # v1.2.6：主翻译引擎设置已取消，只剩一条引擎链
@@ -573,6 +588,27 @@ def main():
     check("读设置失败时退回默认值",
           safe.engine_chain == list(config_mod.DEFAULT_ENGINE_CHAIN), str(safe.engine_chain))
     check("读设置失败时标注来源不可读", safe.source == "unreadable", safe.source)
+
+    # v1.2.7：跳过策略（原来的 skip_existing + ambiguous_cjk 合并成一个键）
+    check("默认跳过策略 = smart（中文与纯汉字都跳过）",
+          blank.skip_policy == "smart" and blank.skip_existing is True
+          and blank.ambiguous_cjk == "skip", str(blank.skip_policy))
+    detect_mode = config_mod.load_settings(FakeApi({"skip_policy": "detect"}), {})
+    check("detect：仍是中文跳过，但纯汉字交给引擎判断",
+          detect_mode.skip_existing is True and detect_mode.ambiguous_cjk == "detect")
+    none_mode = config_mod.load_settings(FakeApi({"skip_policy": "none"}), {})
+    check("none：一律翻译（连已是中文的也送引擎）", none_mode.skip_existing is False)
+    check("填错时按 smart 处理（宁可少翻也别把中文再翻一遍）",
+          config_mod.load_settings(FakeApi({"skip_policy": "Smart?"}), {}).skip_policy == "smart")
+    check("老配置 skip_existing=false 映射成 none",
+          config_mod.load_settings(FakeApi({"skip_existing": "false"}), {}).skip_policy == "none")
+    check("老配置 ambiguous_cjk=detect 映射成 detect",
+          config_mod.load_settings(FakeApi({"skip_existing": "true",
+                                            "ambiguous_cjk": "detect"}), {}).skip_policy == "detect")
+    check("老键被读到时标出来源",
+          any("skip_policy" in k for k in
+              config_mod.load_settings(FakeApi({"skip_existing": "false"}), {}).read_keys),
+          str(config_mod.load_settings(FakeApi({"skip_existing": "false"}), {}).read_keys))
 
     print("\n13) max_items 名额：跳过的已翻译记录不占名额（v1.2.4 回归）")
     # 背景：列表按 id ASC 分页，旧版把「看过的记录」全计入 max_items，

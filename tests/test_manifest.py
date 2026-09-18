@@ -227,10 +227,12 @@ def main():
     sys.path.insert(0, os.path.join(ROOT, "src", PLUGIN_ID))
     from config import DEFAULTS  # noqa: E402
     # v1.2.4 起部分高级微调项不再出现在设置页（仍按内置默认值生效）
+    # v1.2.7：deepl_api_url / lingva_instance 已放回设置页（接口地址段），
+    #          超时与重试三项则彻底撤掉（改为各引擎自己的默认值，不在 DEFAULTS 里）
     hidden_from_ui = {
-        "engine_skip_after", "cache_enabled", "lingva_instance",
+        "engine_skip_after", "cache_enabled",
         "mymemory_email", "tencent_region", "alibaba_region",
-        "http_proxy", "deepl_api_url",
+        "http_proxy",
     }
     missing = sorted(set(DEFAULTS) - set(settings) - hidden_from_ui)
     check("DEFAULTS 里的键都在清单里声明", not missing, "未声明: %s" % missing)

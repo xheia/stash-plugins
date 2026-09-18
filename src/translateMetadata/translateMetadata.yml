@@ -15,7 +15,7 @@ description: >-
   百度、腾讯云、阿里云、Lingva、MyMemory、LibreTranslate、EDGE 免认证接口，
   可配置优先级与失败回退；刮削（场景创建 / 更新）时自动触发，也可在任务页手动批量执行；
   翻译完成后详情页自动刷新显示译文。
-version: 1.2.6
+version: 1.2.7
 url: https://github.com/xheia/stash-plugins
 
 exec:
@@ -54,6 +54,13 @@ tasks:
     description: 只处理标签的名称与描述
     defaultArgs:
       mode: tag
+
+  - name: 翻译 - 试跑 20 条（仅场景，不写回）
+    description: 设置页已取消「单次实际翻译上限」，需要小批量试跑时用这个任务（max_items 经任务参数下发）
+    defaultArgs:
+      mode: scene
+      dry_run: "true"
+      max_items: "20"
 
   - name: 翻译 - 干跑预览（不写回）
     description: 完整走一遍流程并打印译文，但不修改数据库，用于先确认效果
@@ -107,8 +114,12 @@ ui:
 # ---------------------------------------------------------------------------
 # 设置项（设置 -> 插件 -> Metadata Translator）
 #
-# 排版说明：Stash 按声明顺序渲染设置页，这里刻意分成六段 ——
-#   1 引擎选择  2 翻译范围  3 AI 翻译  4 各引擎凭证  5 网络与限流  6 批量与缓存
+# 排版说明：Stash 按声明顺序渲染设置页，这里刻意分成七段 ——
+#   1 引擎选择  2 翻译参数  3 翻译范围  4 内容识别  5 AI 翻译  6 各引擎凭证  7 接口地址
+#
+# v1.2.7 起撤掉了「单次实际翻译上限 / 请求超时 / 瞬时错误重试次数 / 重试等待」：
+# 超时与重试改由各引擎自己的默认值决定（机翻 20s，AI 120s），上限默认不限。
+# 需要临时收口时（比如先试跑），在任务的 defaultArgs 里传 max_items / timeout_s 即可。
 # ---------------------------------------------------------------------------
 settings:
   # ===== ① 引擎选择（只有这一项：按优先级排的引擎链）=====
@@ -121,7 +132,7 @@ settings:
       libretranslate / edge / lingva（openai 质量最好；lingva 公共实例已死，仅自托管可用）"
     type: STRING
 
-  # ===== ② 明细参数（所有引擎共用）=====
+  # ===== ② 翻译参数（所有引擎共用）=====
   source_lang:
     displayName: 源语言
     description: 默认 auto 自动检测
@@ -137,29 +148,9 @@ settings:
     description: 批量任务每次从数据库取多少条，默认 100
     type: NUMBER
 
-  max_items:
-    displayName: 单次实际翻译上限
-    description: 只统计真正翻译的记录；已翻译的跳过不占名额，0 = 不限
-    type: NUMBER
-
   rate_limit_ms:
     displayName: 请求间隔（毫秒）
     description: 两次翻译请求之间的最小间隔，防止打爆接口，默认 300
-    type: NUMBER
-
-  timeout_s:
-    displayName: 请求超时（秒）
-    description: 默认 20，AI 引擎建议 120
-    type: NUMBER
-
-  retry_times:
-    displayName: 瞬时错误重试次数
-    description: 仅对 429 限流与 5xx 重试，默认 1，填 0 不重试
-    type: NUMBER
-
-  retry_backoff_ms:
-    displayName: 重试等待（毫秒）
-    description: 默认 800，按重试次数递增
     type: NUMBER
 
   # ===== ③ 翻译范围 =====
@@ -201,15 +192,12 @@ settings:
     description: "alias = 保留原名并追加中文别名（默认，可逆）；rename = 直接改名"
     type: STRING
 
-  # ===== ④ 内容识别 =====
-  skip_existing:
-    displayName: 跳过已是中文的内容
-    description: 幂等与防死循环的关键，保持开启
-    type: BOOLEAN
-
-  ambiguous_cjk:
-    displayName: 纯汉字（可能是日文）处理
-    description: "skip = 当中文跳过（默认）；detect = 交给引擎检测，日文才翻译"
+  # ===== ④ 内容识别（一个键管两件事：已是中文 + 纯汉字）=====
+  skip_policy:
+    displayName: 跳过策略
+    description: "smart = 已是中文 / 纯汉字都跳过（默认，最保守）；detect = 已是中文跳过，
+      纯汉字交给引擎判断真实语言（日文才翻）；none = 一律翻译（连中文都送引擎）。
+      填错按 smart 处理"
     type: STRING
 
   keep_original:
@@ -273,12 +261,54 @@ settings:
     description: 免费档 Key 以 :fx 结尾
     type: STRING
 
-  libretranslate_url:
-    displayName: LibreTranslate - 地址
-    description: 默认 http://localhost:5000
-    type: STRING
-
   libretranslate_api_key:
     displayName: LibreTranslate - KEY
     description: 自托管未开鉴权时留空
+    type: STRING
+
+  # ===== ⑦ 各翻译服务的接口地址（可选，留空 = 用内置官方地址）=====
+  # 用途：换镜像站、走自建反代、内网网关。填根地址或完整接口地址都接受。
+  google_url:
+    displayName: Google - 接口地址
+    description: 留空用官方 translate.googleapis.com（国内需代理，可指到自建反代）
+    type: STRING
+
+  edge_url:
+    displayName: EDGE - 接口地址
+    description: 留空用官方 edge.microsoft.com/translate/translatetext
+    type: STRING
+
+  baidu_url:
+    displayName: 百度翻译 - 接口地址
+    description: 留空用官方 fanyi-api.baidu.com
+    type: STRING
+
+  tencent_url:
+    displayName: 腾讯云 - 接口地址
+    description: 留空用官方 tmt.tencentcloudapi.com；填 tmt.<地域>.tencentcloudapi.com 会自动取地域
+    type: STRING
+
+  alibaba_url:
+    displayName: 阿里云 - 接口地址
+    description: 留空用官方 mt.aliyuncs.com；也可直接填 cn-hangzhou 这类地域
+    type: STRING
+
+  mymemory_url:
+    displayName: MyMemory - 接口地址
+    description: 留空用官方 api.mymemory.translated.net
+    type: STRING
+
+  deepl_api_url:
+    displayName: DeepL - 接口地址
+    description: 留空按 Key 档位自动选 api-free.deepl.com / api.deepl.com
+    type: STRING
+
+  lingva_instance:
+    displayName: Lingva - 实例地址
+    description: 公共实例基本全死，要用得填自托管实例（如 http://192.168.3.5:3000）
+    type: STRING
+
+  libretranslate_url:
+    displayName: LibreTranslate - 地址
+    description: 该服务没有公共默认实例，需填自托管地址（默认 http://localhost:5000）
     type: STRING

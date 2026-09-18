@@ -56,17 +56,12 @@ DEFAULTS = {
     "translate_details": True,
     "translate_names": False,
     "tag_name_mode": "alias",
-    # 行为
-    "skip_existing": True,
-    "ambiguous_cjk": "skip",
+    # 跳过策略：一个键管两件事（整合前是 skip_existing + ambiguous_cjk 两个键）
+    "skip_policy": "smart",
     "keep_original": True,
     "rate_limit_ms": 300,
-    "timeout_s": 20,
-    "retry_times": 1,
-    "retry_backoff_ms": 800,
     "engine_skip_after": 3,
     "batch_size": 100,
-    "max_items": 0,
     "cache_enabled": True,
     "http_proxy": "",
     # 凭证
@@ -90,7 +85,26 @@ DEFAULTS = {
     "openai_api_key": "",
     "openai_model": "gpt-4o-mini",
     "openai_prompt": "",
+    # 各翻译服务的接口地址（留空 = 用引擎内置的官方地址，见 engines.py 里的 API_URL）
+    # 用途：换镜像站、走自建反代、内网网关。填根地址或完整接口地址都行。
+    "google_url": "",
+    "edge_url": "",
+    "baidu_url": "",
+    "tencent_url": "",
+    "alibaba_url": "",
+    "mymemory_url": "",
 }
+
+# --------------------------------------------------------------------------- #
+# 只能从任务参数传的键
+#
+# v1.2.7 起这三项从设置页撤掉了：超时与重试按「各引擎自己的默认值」走
+# （机翻 20s / 1 次，AI 120s / 1 次，见 engines.py），单次实际翻译上限默认不限。
+# 偶尔仍需要临时收口时（比如先试跑 20 条），在任务的 defaultArgs 里传即可：
+#   {"max_items": "20"} / {"timeout_s": "45"} / {"retry_times": "0"}
+# 它们不在 DEFAULTS 里，所以不会被设置页的空值覆盖，只有显式传入才生效。
+# --------------------------------------------------------------------------- #
+ARG_ONLY_KEYS = ("max_items", "timeout_s", "retry_times", "retry_backoff_ms")
 
 # --------------------------------------------------------------------------- #
 # 旧键名兼容
@@ -209,9 +223,28 @@ class Settings:
         return mode if mode in ("alias", "rename") else "alias"
 
     @property
+    def skip_policy(self):
+        """跳过策略：一个键管两件事（v1.2.7 把 skip_existing + ambiguous_cjk 整合进来）。
+
+          smart  —— 已是中文跳过；纯汉字（可能是日文）也跳过。最保守，默认
+          detect —— 已是中文跳过；纯汉字交给引擎检测真实语言
+          none   —— 一律翻译，连已是中文的也送引擎
+
+        旧配置的两个键在 load_settings 里就被换算成这里的取值了，属性只做归一化。
+        填错一律按 smart：宁可少翻，也不要把中文再翻一遍。
+        """
+        mode = to_str(self._values.get("skip_policy"), "smart").lower()
+        return mode if mode in ("smart", "detect", "none") else "smart"
+
+    @property
+    def skip_existing(self):
+        """是否跳过已是中文的文本（由 skip_policy 派生，保留旧属性名给下游用）。"""
+        return self.skip_policy != "none"
+
+    @property
     def ambiguous_cjk(self):
-        mode = to_str(self._values.get("ambiguous_cjk"), "skip").lower()
-        return mode if mode in ("skip", "detect") else "skip"
+        """纯汉字文本怎么处理（由 skip_policy 派生）。"""
+        return "detect" if self.skip_policy == "detect" else "skip"
 
     @property
     def target_lang(self):
@@ -222,12 +255,15 @@ class Settings:
         return to_str(self._values.get("source_lang"), "auto") or "auto"
 
     def engine_options(self):
-        """传给引擎构造函数的参数。"""
-        return {
-            "timeout_s": max(5, to_int(self._values.get("timeout_s"), 20)),
+        """传给引擎构造函数的参数。
+
+        注意两个刻意的"不传"：
+          * 超时 / 重试次数 / 重试等待 —— 设置页已取消（v1.2.7），各引擎用自己的
+            类默认值（engines.py 的 default_timeout_s 等）。只有任务参数显式给了才传。
+          * 各服务的接口地址 —— 留空表示"没自定义"，引擎会退回内置官方地址。
+        """
+        options = {
             "rate_limit_ms": max(0, to_int(self._values.get("rate_limit_ms"), 300)),
-            "retry_times": max(0, to_int(self._values.get("retry_times"), 1)),
-            "retry_backoff_ms": max(0, to_int(self._values.get("retry_backoff_ms"), 800)),
             "engine_skip_after": max(0, to_int(self._values.get("engine_skip_after"), 3)),
             "http_proxy": to_str(self._values.get("http_proxy")),
             "baidu_appid": to_str(self._values.get("baidu_appid")),
@@ -248,7 +284,21 @@ class Settings:
             "openai_api_key": to_str(self._values.get("openai_api_key")),
             "openai_model": to_str(self._values.get("openai_model")),
             "openai_prompt": to_str(self._values.get("openai_prompt")),
+            # 各服务的接口地址（空串 = 没自定义，引擎退回内置官方地址）
+            "google_url": to_str(self._values.get("google_url")),
+            "edge_url": to_str(self._values.get("edge_url")),
+            "baidu_url": to_str(self._values.get("baidu_url")),
+            "tencent_url": to_str(self._values.get("tencent_url")),
+            "alibaba_url": to_str(self._values.get("alibaba_url")),
+            "mymemory_url": to_str(self._values.get("mymemory_url")),
         }
+
+        # 超时 / 重试这三个键设置页里没有了，只有任务参数显式给了才往下传，
+        # 否则引擎用自己的默认值（不传 = 让引擎决定）。
+        for key in ("timeout_s", "retry_times", "retry_backoff_ms"):
+            if self._values.get(key) not in (None, ""):
+                options[key] = max(0, to_int(self._values.get(key), 0))
+        return options
 
     def auto_enabled(self, entity):
         return to_bool(self._values.get("auto_" + entity), DEFAULTS.get("auto_" + entity, True))
@@ -266,6 +316,7 @@ def load_settings(api, args=None):
     overrides = {}
     from_settings = []
     from_alias = []
+    from_args = []
 
     raw = None
     try:
@@ -303,6 +354,13 @@ def load_settings(api, args=None):
         else:
             overrides[key] = to_str(value, DEFAULTS[key])
 
+    # 只能走任务参数的键（设置页已取消这三项）：显式传了才生效，
+    # 并且不算作"设置来源是设置页"，免得日志里误导人。
+    for key in ARG_ONLY_KEYS:
+        if key in args and args[key] not in (None, ""):
+            overrides[key] = max(0, to_int(args[key], 0))
+            from_args.append("%s(任务参数)" % key)
+
     # 兼容 v1.2.6 之前的老配置：那时还有个单独的「主翻译引擎」键（engine）。
     # 它已经不在 DEFAULTS / 设置页里，所以上面那个循环不会碰它，这里单独读一次。
     # 只有在「翻译引擎链」也留空时才会真正生效（见 Settings.engine_chain）。
@@ -313,6 +371,27 @@ def load_settings(api, args=None):
                 overrides["engine"] = to_str(legacy_engine, "")
                 from_alias.append("engine_fallback<-engine(旧版主引擎键)")
                 break
+
+    # 兼容 v1.2.7 之前的两个键：skip_existing + ambiguous_cjk 已合并成 skip_policy。
+    # 老配置里改过这两项的人不少（比如把「跳过已是中文」关掉），不换算的话升级后
+    # 会静默变回默认策略。只在用户没填 skip_policy 时才做这层换算。
+    if "skip_policy" not in overrides:
+        legacy_skip = {}
+        for legacy_key in ("skip_existing", "ambiguous_cjk"):
+            for src in (raw, args):
+                legacy_value = (src or {}).get(legacy_key)
+                if legacy_value not in (None, ""):
+                    legacy_skip[legacy_key] = legacy_value
+                    break
+        if legacy_skip:
+            if not to_bool(legacy_skip.get("skip_existing"), True):
+                mode = "none"
+            elif to_str(legacy_skip.get("ambiguous_cjk")).lower() == "detect":
+                mode = "detect"
+            else:
+                mode = "smart"
+            overrides["skip_policy"] = mode
+            from_alias.append("skip_policy<-%s(旧版键)" % ",".join(sorted(legacy_skip)))
 
     # bool/int 类型一律按默认值同类型收口，避免字符串混进来
     for key in BOOL_KEYS:
@@ -329,7 +408,7 @@ def load_settings(api, args=None):
     else:
         source = "empty"
 
-    return Settings(overrides, source=source, read_keys=from_settings + from_alias)
+    return Settings(overrides, source=source, read_keys=from_settings + from_alias + from_args)
 
 
 def describe_engine_chain(settings):

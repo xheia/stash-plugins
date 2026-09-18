@@ -215,14 +215,33 @@ class BaseEngine:
 
     name = "base"
 
+    # 各引擎自己的默认值 —— v1.2.7 起设置页不再暴露「请求超时 / 重试次数 / 重试等待」，
+    # 由这里兜底；子类按自身特点覆盖（LLM 慢，给 120s）。
+    # 任务参数里显式传 timeout_s / retry_times 仍然优先。
+    default_timeout_s = 20
+    default_retry_times = 1
+    default_retry_backoff_ms = 800
+
     def __init__(self, options=None):
         options = options or {}
-        self.timeout = int(options.get("timeout_s") or 20)
+        self.options = dict(options)
+        self.timeout = int(options.get("timeout_s") or self.default_timeout_s)
         self.rate_limit_ms = int(options.get("rate_limit_ms") or 0)
         self.proxy = normalize_proxy(options.get("http_proxy"))
-        self.retries = max(0, int(options.get("retry_times") or 0))
-        self.backoff_ms = max(0, int(options.get("retry_backoff_ms") or 800))
+        raw_retries = options.get("retry_times")
+        self.retries = (max(0, int(raw_retries)) if raw_retries not in (None, "")
+                        else self.default_retry_times)
+        raw_backoff = options.get("retry_backoff_ms")
+        self.backoff_ms = (max(0, int(raw_backoff)) if raw_backoff not in (None, "")
+                           else self.default_retry_backoff_ms)
         self._last_request = 0.0
+
+    def custom_url(self, key, fallback):
+        """取自定义接口地址：设置页留空（空串/未填）就用内置官方地址。
+
+        用途是换镜像站、自建反代、走内网网关 —— 比如国内把 google 指到自建代理。
+        """
+        return str(self.options.get(key) or "").strip() or fallback
 
     # -- 内部工具 ---------------------------------------------------------- #
     def _throttle(self):
@@ -291,11 +310,15 @@ class EdgeEngine(BaseEngine):
         "需要代理且代理规则不得把微软域名放直连；请用其它引擎或调整代理规则。"
     )
 
+    def __init__(self, options=None):
+        super().__init__(options)
+        self.api_url = self.custom_url("edge_url", self.API_URL)
+
     def translate_detailed(self, text, source="auto", target="zh-CN"):
         params = {"api-version": "3.0", "to": self.lang(target)}
         if source and source != "auto":
             params["from"] = self.lang(source)
-        url = self.API_URL + "?" + urllib.parse.urlencode(params)
+        url = self.api_url + "?" + urllib.parse.urlencode(params)
 
         data = self._request(
             url,
@@ -340,6 +363,10 @@ class GoogleEngine(BaseEngine):
     UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
           "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 
+    def __init__(self, options=None):
+        super().__init__(options)
+        self.api_url = self.custom_url("google_url", self.API_URL)
+
     def translate_detailed(self, text, source="auto", target="zh-CN"):
         params = {
             "client": "gtx",
@@ -348,7 +375,7 @@ class GoogleEngine(BaseEngine):
             "dt": "t",
             "q": text,
         }
-        url = self.API_URL + "?" + urllib.parse.urlencode(params)
+        url = self.api_url + "?" + urllib.parse.urlencode(params)
         self._throttle()
         status, raw = http_request(
             url,
@@ -392,6 +419,7 @@ class BaiduEngine(BaseEngine):
         options = options or {}
         self.appid = (options.get("baidu_appid") or "").strip()
         self.key = (options.get("baidu_key") or "").strip()
+        self.api_url = self.custom_url("baidu_url", self.API_URL)
 
     def available(self):
         return bool(self.appid and self.key)
@@ -409,7 +437,7 @@ class BaiduEngine(BaseEngine):
         ).hexdigest()
 
         data = self._request(
-            self.API_URL,
+            self.api_url,
             method="POST",
             form={
                 "q": text,
@@ -443,6 +471,9 @@ class BaiduEngine(BaseEngine):
 # --------------------------------------------------------------------------- #
 TENCENT_DEFAULT_HOST = "tmt.tencentcloudapi.com"
 TENCENT_DEFAULT_REGION = "ap-guangzhou"
+# 官方地域域名形如 tmt.ap-shanghai.tencentcloudapi.com；自定义地址若是这种形状，
+# 就顺带把地域解析出来（换成内网网关这类非标准域名时仍按 tencent_region 走）。
+TENCENT_REGION_HOST_RE = re.compile(r"^tmt\.[a-z0-9-]+\.tencentcloudapi\.com$", re.I)
 
 
 def normalize_tencent_endpoint(value):
@@ -483,7 +514,14 @@ class TencentEngine(BaseEngine):
         options = options or {}
         self.secret_id = (options.get("tencent_secret_id") or "").strip()
         self.secret_key = (options.get("tencent_secret_key") or "").strip()
-        self.host, self.region = normalize_tencent_endpoint(options.get("tencent_region"))
+        custom = (options.get("tencent_url") or "").strip()
+        if custom:
+            self.host, derived_region = normalize_tencent_endpoint(custom)
+            self.region = (derived_region if TENCENT_REGION_HOST_RE.match(self.host)
+                           else (options.get("tencent_region") or TENCENT_DEFAULT_REGION).strip()
+                           or TENCENT_DEFAULT_REGION)
+        else:
+            self.host, self.region = normalize_tencent_endpoint(options.get("tencent_region"))
 
     def available(self):
         return bool(self.secret_id and self.secret_key)
@@ -607,7 +645,10 @@ class AlibabaEngine(BaseEngine):
         #   https://mt.cn-hangzhou.aliyuncs.com  -> 取 host
         #   mt.aliyuncs.com                      -> 原样使用
         #   cn-hangzhou                          -> 补成 mt.cn-hangzhou.aliyuncs.com
-        raw = (options.get("alibaba_region") or options.get("alibaba_endpoint") or "").strip()
+        # alibaba_url 是 v1.2.7 起的正式键名；alibaba_region / alibaba_endpoint 是历史键名，
+        # 继续兼容 —— 谁填了用谁。
+        raw = (options.get("alibaba_url") or options.get("alibaba_region")
+               or options.get("alibaba_endpoint") or "").strip()
         host = ""
         if raw:
             if "//" in raw:
@@ -869,6 +910,7 @@ class MyMemoryEngine(BaseEngine):
         super().__init__(options)
         options = options or {}
         self.email = (options.get("mymemory_email") or "").strip()
+        self.api_url = self.custom_url("mymemory_url", self.API_URL)
 
     def translate_detailed(self, text, source="auto", target="zh-CN"):
         if len(text.encode("utf-8")) > 500:
@@ -885,7 +927,7 @@ class MyMemoryEngine(BaseEngine):
         if self.email:
             params["de"] = self.email
 
-        url = self.API_URL + "?" + urllib.parse.urlencode(params)
+        url = self.api_url + "?" + urllib.parse.urlencode(params)
         self._throttle()
         status, raw = http_request(
             url,
@@ -977,6 +1019,8 @@ class OpenAIEngine(BaseEngine):
     name = "openai"
     DEFAULT_BASE = "https://api.openai.com/v1"
     DEFAULT_MODEL = "gpt-4o-mini"
+    # LLM 比机翻慢得多（本地 Ollama 更慢），单独给个更大的默认超时
+    default_timeout_s = 120
 
     # 提示词里的目标语言名称（比语言代码更不容易被模型理解错）
     LANG_PROMPT = {

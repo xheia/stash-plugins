@@ -24,7 +24,7 @@ from config import load_settings, cache_path, describe_engine_chain
 from engines import EngineError, Router, normalize_proxy
 from stash_api import StashAPI, StashError
 
-VERSION = "1.2.6"
+VERSION = "1.2.7"
 
 # hook 类型前缀 -> 实体名
 _HOOK_ENTITY = {
@@ -72,7 +72,8 @@ class Translator:
             self.stats["skipped"] += 1
             return None, None
 
-        if self.settings["skip_existing"] and not detect.needs_translation(
+        # v1.2.7 起 skip_existing / ambiguous_cjk 由 skip_policy 派生，走属性而不是取键
+        if self.settings.skip_existing and not detect.needs_translation(
             original, self.settings.ambiguous_cjk
         ):
             self.stats["skipped"] += 1
@@ -218,7 +219,8 @@ def run_hook(api, settings, router, cache, hook_context):
 def run_batch(api, settings, router, cache, entities, dry_run):
     translator = Translator(settings, router, cache)
     batch_size = max(1, int(settings["batch_size"]))
-    max_items = max(0, int(settings["max_items"]))
+    # v1.2.7 起设置页里没有这一项了，默认不限；只有任务参数显式传了才有值
+    max_items = max(0, int(settings["max_items"] or 0))
 
     summary = []
     for entity in entities:
@@ -348,9 +350,15 @@ def run_selftest(settings, router):
             log.info("http_proxy：未设置，直连（无系统代理）")
     log.info("引擎链来源：%s" % describe_engine_chain(settings))
     log.info("引擎优先级：%s" % " -> ".join(router.chain_names() or ["(无)"]))
-    log.info("参数：超时 %ss，请求间隔 %sms，瞬时错误重试 %d 次，熔断阈值 %s"
-             % (settings["timeout_s"], settings["rate_limit_ms"], settings["retry_times"],
-                settings["engine_skip_after"] or "关闭"))
+    log.info("参数：请求间隔 %sms，熔断阈值 %s"
+             % (settings["rate_limit_ms"], settings["engine_skip_after"] or "关闭"))
+    # v1.2.7 起超时与重试不再出现在设置页，各引擎用自己的默认值 —— 这里把实际生效的
+    # 值逐个列出来，否则"没得改"就成了"没法查"。
+    engines_in_use = getattr(router, "engines", None) or []
+    if engines_in_use:
+        log.info("超时 / 重试（各引擎默认值，任务参数可临时覆盖）：%s"
+                 % "，".join("%s %ss/%d次" % (e.name, e.timeout, e.retries)
+                             for e in engines_in_use))
 
     if not router.has_engine():
         text = "没有可用引擎，请检查设置里的引擎与凭证"

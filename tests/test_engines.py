@@ -769,6 +769,90 @@ engines.http_request = _real_http_request
 
 
 # --------------------------------------------------------------------------- #
+# 22. 各翻译服务的自定义接口地址（v1.2.7）
+#     留空 = 官方地址；填了就用填的（换镜像站 / 自建反代 / 内网网关）。
+# --------------------------------------------------------------------------- #
+section("22) 自定义接口地址")
+
+check("Google 默认官方地址",
+      engines.GoogleEngine({}).api_url == "https://translate.googleapis.com/translate_a/single",
+      engines.GoogleEngine({}).api_url)
+check("百度默认官方地址",
+      engines.BaiduEngine({}).api_url == "https://fanyi-api.baidu.com/api/trans/vip/translate")
+check("MyMemory 默认官方地址",
+      engines.MyMemoryEngine({}).api_url == "https://api.mymemory.translated.net/get")
+check("EDGE 默认官方地址",
+      engines.EdgeEngine({}).api_url == "https://edge.microsoft.com/translate/translatetext")
+
+check("Google 用自定义地址",
+      engines.GoogleEngine({"google_url": "https://mt.example.com/g"}).api_url
+      == "https://mt.example.com/g")
+check("百度用自定义地址",
+      engines.BaiduEngine({"baidu_url": "https://baidu.example.com/api"}).api_url
+      == "https://baidu.example.com/api")
+check("MyMemory 用自定义地址",
+      engines.MyMemoryEngine({"mymemory_url": "https://mm.example.com/get"}).api_url
+      == "https://mm.example.com/get")
+check("EDGE 用自定义地址（顺手去空格）",
+      engines.EdgeEngine({"edge_url": "  https://edge.example.com/tt  "}).api_url
+      == "https://edge.example.com/tt")
+
+# 光"读到了"不算数，得确认请求真的打到自定义地址上
+engines.http_request = _stub_http(200, [
+    {"detectedLanguage": {"language": "en"},
+     "translations": [{"text": "你好", "to": "zh-Hans"}]}])
+engines.EdgeEngine({"edge_url": "https://edge.example.com/tt"}).translate_detailed("hi")
+check("EDGE 请求确实打到自定义地址",
+      engines.http_request.last_url.startswith("https://edge.example.com/tt"),
+      engines.http_request.last_url)
+
+engines.http_request = _stub_http(200, {"Response": {"TargetText": "你好", "Source": "en"}})
+engines.TencentEngine({"tencent_secret_id": "i", "tencent_secret_key": "k",
+                       "tencent_url": "https://tmt.ap-shanghai.tencentcloudapi.com"}
+                      ).translate_detailed("hi")
+check("腾讯云请求打到自定义地址",
+      engines.http_request.last_url == "https://tmt.ap-shanghai.tencentcloudapi.com",
+      engines.http_request.last_url)
+
+# 腾讯云的自定义地址与地域要配合好：官方域名能解析出地域，
+# 换成内网网关这类非标准域名时则按 tencent_region 走
+tc_official = engines.TencentEngine({"tencent_url": "https://tmt.ap-shanghai.tencentcloudapi.com"})
+check("腾讯云：官方地域域名自动解析出地域",
+      (tc_official.host, tc_official.region) == ("tmt.ap-shanghai.tencentcloudapi.com", "ap-shanghai"),
+      "%s / %s" % (tc_official.host, tc_official.region))
+tc_mirror = engines.TencentEngine({"tencent_url": "https://tmt.internal.corp",
+                                   "tencent_region": "ap-beijing"})
+check("腾讯云：内网网关这类域名按 tencent_region 定地域",
+      (tc_mirror.host, tc_mirror.region) == ("tmt.internal.corp", "ap-beijing"),
+      "%s / %s" % (tc_mirror.host, tc_mirror.region))
+
+check("阿里云用自定义地址（完整域名）",
+      engines.AlibabaEngine({"alibaba_url": "https://mt.cn-hangzhou.aliyuncs.com"}).host
+      == "mt.cn-hangzhou.aliyuncs.com")
+check("阿里云用自定义地址（只填地域）",
+      engines.AlibabaEngine({"alibaba_url": "cn-hangzhou"}).host == "mt.cn-hangzhou.aliyuncs.com")
+check("阿里云老键名 alibaba_region 仍兼容",
+      engines.AlibabaEngine({"alibaba_region": "mt.ap-southeast-1.aliyuncs.com"}).host
+      == "mt.ap-southeast-1.aliyuncs.com")
+check("阿里云默认官方地址", engines.AlibabaEngine({}).host == "mt.aliyuncs.com")
+
+# 超时 / 重试：设置页已撤掉，改由各引擎自己兜底
+check("机翻引擎默认 20s / 重试 1 次",
+      (engines.EdgeEngine({}).timeout, engines.EdgeEngine({}).retries) == (20, 1),
+      str((engines.EdgeEngine({}).timeout, engines.EdgeEngine({}).retries)))
+check("AI 引擎默认超时 120s",
+      engines.OpenAIEngine({}).timeout == 120, str(engines.OpenAIEngine({}).timeout))
+check("任务参数显式指定时优先生效",
+      (engines.EdgeEngine({"timeout_s": 45}).timeout,
+       engines.EdgeEngine({"retry_times": 0}).retries,
+       engines.EdgeEngine({"retry_backoff_ms": 100}).backoff_ms) == (45, 0, 100))
+check("retry_times=0 表示「不重试」而不是「用默认」",
+      engines.EdgeEngine({"retry_times": 0}).retries == 0)
+
+engines.http_request = _real_http_request
+
+
+# --------------------------------------------------------------------------- #
 print("\n" + "=" * 60)
 print("通过 %d 项，失败 %d 项" % (len(PASSED), len(FAILED)))
 for name, detail in FAILED:
