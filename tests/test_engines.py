@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import sys
+import urllib.error
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src", "translateMetadata"))
@@ -536,7 +537,10 @@ def _stub_http(status, payload):
         fake.last_url = url
         fake.last_headers = dict(headers or {})
         fake.last_body = (data or b"").decode("utf-8")
+        fake.calls += 1
         return status, raw
+
+    fake.calls = 0
 
     return fake
 
@@ -588,50 +592,152 @@ engines.http_request = _real_http_request
 
 
 # --------------------------------------------------------------------------- #
-# 18. MyMemory 引擎
+# 18. 失败分类：额度 / 凭证 / 普通（决定要不要继续在这个引擎上花时间）
+#
+# 背景：线上出现过「全库几千条，每条都在同一个死引擎上白打一次请求」——
+# 账号欠费、Key 填错这类错误重试一万次也一样，必须一次定性、本轮停用它。
 # --------------------------------------------------------------------------- #
-section("18) MyMemory 引擎")
+section("18) 失败分类（额度 / 凭证）")
 
-mm = engines.MyMemoryEngine({"mymemory_email": "me@example.com"})
-engines.http_request = _stub_http(200, {"responseData": {"translatedText": "你好"},
-                                        "responseStatus": "200"})
-out = mm.translate_detailed("Hello", "auto", "zh-CN")
-check("MyMemory 正常解析", out == ("你好", None), str(out))
-check("auto 源语言 -> Autodetect", "langpair=Autodetect%7Czh-CN" in engines.http_request.last_url,
-      engines.http_request.last_url)
-check("email 提额参数", "de=me%40example.com" in engines.http_request.last_url,
-      engines.http_request.last_url)
+quota_samples = [
+    "腾讯云报错 FailedOperation.NoFreeAmount: 免费额度已用完",
+    "腾讯云报错 FailedOperation.InsufficientBalance: 账户余额不足",
+    "百度翻译报错 54004: 账户余额不足",
+    "百度翻译报错 58002: 服务当前已关闭",
+    "阿里云报错 InvalidAccountStatus: 未开通服务",
+    "DeepL 配额已用完 (HTTP 456)：本月免费额度耗尽",
+]
+for sample in quota_samples:
+    check("额度类: %s" % sample[:24], engines.looks_like_quota(sample), sample)
 
-engines.http_request = _stub_http(200, {"responseData": {"translatedText": "你好"},
-                                        "responseStatus": "200"})
-out = engines.MyMemoryEngine({}).translate_detailed("Hello", "en", "zh-CN")
-check("显式源语言 -> en|zh-CN", "langpair=en%7Czh-CN" in engines.http_request.last_url,
-      engines.http_request.last_url)
+cred_samples = [
+    "DeepL 认证失败 (HTTP 403)：Key 无效或填错档位",
+    "腾讯云报错 AuthFailure.SignatureFailure: 签名错误",
+    "阿里云报错 InvalidAccessKeyId.NotFound: 无效的 AccessKeyId",
+    "百度翻译报错 52003: 未授权用户",
+]
+for sample in cred_samples:
+    check("凭证类: %s" % sample[:24], engines.looks_like_credentials(sample), sample)
 
-engines.http_request = _stub_http(200, {"responseData": {
-    "translatedText": "MYMEMORY WARNING: YOU USED ALL AVAILABLE FREE TRANSLATIONS FOR TODAY"},
-    "responseStatus": "200"})
+check("限流不算额度类（429 值得重试）",
+      not engines.looks_like_quota("HTTP 429 Too Many Requests"))
+check("网络错误不算额度类",
+      not engines.looks_like_quota("网络错误: [SSL: UNEXPECTED_EOF_WHILE_READING]"))
+check("额度类抛 EngineQuotaError",
+      isinstance(engines.api_error("余额不足"), engines.EngineQuotaError))
+check("凭证类抛 EngineCredentialsError",
+      isinstance(engines.api_error("HTTP 403 forbidden"), engines.EngineCredentialsError))
+check("普通错误仍是 EngineError",
+      type(engines.api_error("网络错误: timeout")) is engines.EngineError)
+
+# 全链停用 -> 任务该停：额度用尽给"无额度"，凭证问题给"凭证"提示
+engines.http_request = _stub_http(200, {"error_code": 54004, "error_msg": "账户余额不足"})
+router_quota = engines.Router(["baidu"], {"baidu_appid": "a", "baidu_key": "b"})
 try:
-    mm.translate_detailed("Hello")
-    check("MyMemory 配额告警应抛错", False)
-except engines.EngineError as exc:
-    check("MyMemory 配额告警被拒绝", "MYMEMORY WARNING" in str(exc), str(exc))
+    router_quota.translate("hello")
+    check("额度用尽应抛错", False)
+except engines.EngineQuotaError as exc:
+    check("额度用尽抛 EngineQuotaError", "额度" in str(exc) and "baidu" in str(exc), str(exc))
+check("额度用尽的引擎被停用", router_quota.unusable_names() == ["baidu"],
+      str(router_quota.unusable_names()))
+check("全链停用时给出停止信号", router_quota.stop_exception() is not None)
+check("停用信号里写明是额度问题",
+      "额度" in str(router_quota.stop_exception()), str(router_quota.stop_exception()))
 
+# 停用的引擎在后续文本上不再被打扰（请求计数是关键）
+engines.http_request.last_url = None
+calls_before = engines.http_request.calls
 try:
-    engines.MyMemoryEngine({}).translate_detailed("长" * 300)
-    check("MyMemory 超长应抛错", False)
-except engines.EngineError as exc:
-    check("MyMemory 超长上限提示", "500" in str(exc), str(exc))
+    router_quota.translate("world")
+except engines.EngineError:
+    pass
+check("已被停用的引擎不会再被调用",
+      engines.http_request.calls == calls_before, str(engines.http_request.calls))
 
-engines.http_request = _stub_http(403, {"responseDetails": "Invalid langpair",
-                                        "responseStatus": "403"})
+# 凭证类同理
+engines.http_request = _stub_http(200, {"error_code": 52003, "error_msg": "未授权用户"})
+router_cred = engines.Router(["baidu"], {"baidu_appid": "a", "baidu_key": "b"})
 try:
-    mm.translate_detailed("Hello")
-    check("MyMemory 报错应抛错", False)
-except engines.EngineError as exc:
-    check("MyMemory 错误透出详情", "Invalid langpair" in str(exc), str(exc))
+    router_cred.translate("hello")
+    check("凭证无效应抛错", False)
+except engines.EngineCredentialsError as exc:
+    check("凭证无效抛 EngineCredentialsError", "未授权" in str(exc), str(exc))
+check("凭证类停用后给出停止信号",
+      isinstance(router_cred.stop_exception(), engines.EngineCredentialsError))
 
 engines.http_request = _real_http_request
+
+
+# --------------------------------------------------------------------------- #
+# 19. 请求次数不重复：一段文本、一个引擎，最多 retries+1 次 HTTP
+#
+# 背景：重试与"网络异常换链路"曾经各自计数，最坏一次翻译打出 4 个请求
+# —— 额度掉得莫名其妙，还查不出原因。现在两者共用同一份预算。
+# --------------------------------------------------------------------------- #
+section("19) 请求预算（不重复调用）")
+
+
+class _CountingOpener:
+    """只数请求次数的 opener：不发真请求，按配置抛网络错误或 5xx。"""
+
+    def __init__(self, state):
+        self.state = state
+
+    def open(self, req, timeout=None):
+        self.state["opens"] += 1
+        if self.state.get("http_status"):
+            raise urllib.error.HTTPError(
+                req.full_url, self.state["http_status"], "boom", {}, None)
+        raise urllib.error.URLError("boom")
+
+
+_real_build_opener = engines._build_opener
+_real_routes = engines._routes
+_real_cache = dict(engines._ROUTE_CACHE)
+
+state = {"opens": 0}
+engines._ROUTE_CACHE.clear()
+engines._build_opener = lambda route: _CountingOpener(state)
+engines._routes = lambda proxy, host: [("代理 %s" % proxy, proxy), ("直连", "")]
+try:
+    engines.http_request("https://example.invalid/x", proxy="http://127.0.0.1:7890", retries=1)
+    check("网络异常最终应抛错", False)
+except engines.EngineError as exc:
+    check("网络异常最终抛 EngineError", "网络错误" in str(exc), str(exc))
+check("重试与换链路共用预算：retries=1 -> 最多 2 次请求",
+      state["opens"] == 2, "实际 %d 次" % state["opens"])
+
+state["opens"] = 0
+try:
+    engines.http_request("https://example.invalid/x", proxy="http://127.0.0.1:7890", retries=0)
+except engines.EngineError:
+    pass
+check("retries=0 -> 只发 1 次请求", state["opens"] == 1, "实际 %d 次" % state["opens"])
+
+# 没配代理且环境里也没有代理时只有一条链路：网络错误不在这条链路上反复试
+state["opens"] = 0
+engines._routes = lambda proxy, host: [("直连", "")]
+try:
+    engines.http_request("https://example.invalid/x", retries=1)
+except engines.EngineError:
+    pass
+check("单链路上的网络错误只发 1 次（交给上层换引擎）",
+      state["opens"] == 1, "实际 %d 次" % state["opens"])
+
+# 单链路上的 5xx 仍然按预算原地重试
+state["opens"] = 0
+state["http_status"] = 503
+try:
+    engines.http_request("https://example.invalid/x", retries=1, backoff_ms=1)
+except engines.EngineError as exc:
+    check("5xx 最终抛错", "503" in str(exc), str(exc))
+check("单链路上的 503 重试 1 次（共 2 次）", state["opens"] == 2, "实际 %d 次" % state["opens"])
+state.pop("http_status")
+
+engines._build_opener = _real_build_opener
+engines._routes = _real_routes
+engines._ROUTE_CACHE.clear()
+engines._ROUTE_CACHE.update(_real_cache)
 
 
 # --------------------------------------------------------------------------- #
@@ -735,8 +841,6 @@ check("Google 默认官方地址",
       engines.GoogleEngine({}).api_url)
 check("百度默认官方地址",
       engines.BaiduEngine({}).api_url == "https://fanyi-api.baidu.com/api/trans/vip/translate")
-check("MyMemory 默认官方地址",
-      engines.MyMemoryEngine({}).api_url == "https://api.mymemory.translated.net/get")
 check("EDGE 默认官方地址",
       engines.EdgeEngine({}).api_url == "https://edge.microsoft.com/translate/translatetext")
 
@@ -746,9 +850,6 @@ check("Google 用自定义地址",
 check("百度用自定义地址",
       engines.BaiduEngine({"baidu_url": "https://baidu.example.com/api"}).api_url
       == "https://baidu.example.com/api")
-check("MyMemory 用自定义地址",
-      engines.MyMemoryEngine({"mymemory_url": "https://mm.example.com/get"}).api_url
-      == "https://mm.example.com/get")
 check("EDGE 用自定义地址（顺手去空格）",
       engines.EdgeEngine({"edge_url": "  https://edge.example.com/tt  "}).api_url
       == "https://edge.example.com/tt")

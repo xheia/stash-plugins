@@ -74,9 +74,14 @@ SORT_DIRECTIONS = {"ASC", "DESC"}
 # CustomFieldsInput 允许的键
 CUSTOM_FIELDS_KEYS = {"full", "partial", "remove"}
 
+# 插件做认证探活用的一次最便宜的查询
+# 出处：graphql/schema/schema.graphql —— `version: Version!`；
+#       graphql/schema/types/version.graphql —— `Version { version, hash, build_time }`
+AUTH_PROBE_FIELDS = ("version",)
+
 KNOWN_TYPES = {spec[1] for spec in ENTITY_CONTRACT.values()} | AUXILIARY_TYPES
 KNOWN_MUTATIONS = {spec[0] for spec in ENTITY_CONTRACT.values()}
-KNOWN_QUERIES = set()
+KNOWN_QUERIES = set(AUTH_PROBE_FIELDS)
 for _spec in ENTITY_CONTRACT.values():
     KNOWN_QUERIES.add(_spec[2])
     KNOWN_QUERIES.add(_spec[3])

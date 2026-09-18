@@ -21,11 +21,11 @@ import detect
 import fields
 import log
 from config import (load_settings, cache_path, describe_engine_chain,
-                    initialize_default_settings)
+                    fail_fast_threshold, initialize_default_settings)
 from engines import EngineError, Router, normalize_proxy
-from stash_api import StashAPI, StashError
+from stash_api import StashAPI, StashAuthError, StashError
 
-VERSION = "1.2.9"
+VERSION = "1.3.0"
 
 # hook 类型前缀 -> 实体名
 _HOOK_ENTITY = {
@@ -65,6 +65,22 @@ class Translator:
         self.cache = cache
         self.chain_key = "+".join(router.chain_names())
         self.stats = {"translated": 0, "skipped": 0, "cached": 0, "failed": 0, "engine_used": {}}
+        # 连续失败保护：整条引擎链都翻不动时，扫库只是白耗时间（见 config.py）
+        self.fail_fast_after = fail_fast_threshold(settings)
+        self.consecutive_failures = 0
+        self.last_error = ""
+
+    def should_abort(self):
+        """连续 N 次「所有引擎都失败」——判定为全局故障，该停任务了。
+
+        注意"跳过"（已是中文 / 命中缓存）不算尝试次数，既不增加也不清零，
+        所以中间夹着已翻译内容时依然能触发保护。
+        """
+        return bool(self.fail_fast_after) and self.consecutive_failures >= self.fail_fast_after
+
+    def abort_reason(self):
+        return ("连续 %d 次翻译请求全部失败（最近一次：%s）"
+                % (self.consecutive_failures, self.last_error or "未记录"))
 
     def translate_text(self, text):
         """返回 (译文, 引擎名)；无需翻译返回 (None, None)。"""
@@ -103,8 +119,14 @@ class Translator:
             result = self.router.translate(original, source, target)
         except EngineError as exc:
             self.stats["failed"] += 1
+            self.consecutive_failures += 1
+            self.last_error = str(exc)
             log.error("翻译失败 [%s]: %s" % (original[:60], exc))
             return None, None
+
+        # 引擎有回应（哪怕判定"不用翻"）就说明链路是通的，计数器归零
+        self.consecutive_failures = 0
+        self.last_error = ""
 
         # 引擎自己判定原文已经就是中文 —— 不要改写
         if not result.text or result.text == original:
@@ -250,6 +272,11 @@ def run_batch(api, settings, router, cache, entities, dry_run):
                     try:
                         written_total += len(write_entity(
                             api, entity, record, items, settings, dry_run))
+                    except StashAuthError:
+                        # 认证失效是全局性的（会话过期 / Stash 重启 / API Key 不对），
+                        # 逐条重试没有意义，只会把日志刷满 401。直接抛给入口，
+                        # 由那里打一条带排查提示的错误并结束任务。
+                        raise
                     except StashError as exc:
                         log.error("%s#%s 写回失败: %s" % (fields.label(entity), record.get("id"), exc))
                     # 名额只统计真正动了翻译的记录；已翻译/无可译字段的记录
@@ -257,6 +284,22 @@ def run_batch(api, settings, router, cache, entities, dry_run):
                     # 重新扫起，永远轮不到后面未翻译的内容。
                     translated += 1
                 log.progress_step(examined, total)
+
+                # 全链都被停用（没额度 / 凭证不对）：重试没有意义，立刻停下
+                stop = router.stop_exception()
+                if stop is not None:
+                    raise type(stop)(
+                        "%s。已停止任务：按提示修正后重跑即可，已翻译的内容已写回。"
+                        % stop)
+
+                # 整条引擎链连续翻不动 —— 全局故障（凭证/代理），
+                # 再扫下去只会把日志刷满。停在这里，已写回的部分保留。
+                if translator.should_abort():
+                    raise EngineError(
+                        "%s。已停止任务：先跑「测试翻译引擎」确认是哪个环节"
+                        "（凭证 / 额度 / 代理），修好后重跑即可，已翻译的内容已写回。"
+                        "若只想关掉这个保护，给任务传 fail_fast_after=0。"
+                        % translator.abort_reason())
 
             log.info("%s 第 %d 页完成（已扫描 %d/%d，本次翻译 %d 个）"
                      % (fields.label(entity), page, examined, total, translated))
@@ -331,10 +374,20 @@ def run_rollback(api, settings, dry_run):
 # --------------------------------------------------------------------------- #
 # 任务：测试引擎
 # --------------------------------------------------------------------------- #
-def run_selftest(settings, router):
+def run_selftest(api, settings, router):
     # 先把「实际生效的配置」摆出来。排查问题时这一屏能省掉很多来回：
     # 引擎被谁覆盖了、代理串是不是写错了、凭证到底读没读到，一眼可见。
+    #
+    # v1.3.0 起先探一次 Stash 自己的连接与认证 —— 401 这类问题会伪装成
+    # 「所有引擎都失败/写回失败」，先确认这一层通了，再看引擎。
     log.info("设置来源：%s" % describe_settings_source(settings))
+    try:
+        version = api.verify()
+        log.info("[成功] Stash 连接（%s）：%s，认证方式：%s%s"
+                 % (api.endpoint, version, api.auth_label(),
+                    "，已跟随服务端续期 %d 次" % api.refreshed if api.refreshed else ""))
+    except StashError as exc:
+        log.warning("[失败] Stash 连接（%s）：%s" % (api.endpoint, exc))
     raw_proxy = (settings["http_proxy"] or "").strip()
     if raw_proxy:
         fixed = normalize_proxy(raw_proxy)
@@ -353,6 +406,8 @@ def run_selftest(settings, router):
     log.info("引擎优先级：%s" % " -> ".join(router.chain_names() or ["(无)"]))
     log.info("参数：请求间隔 %sms，熔断阈值 %s"
              % (settings["rate_limit_ms"], settings["engine_skip_after"] or "关闭"))
+    log.info("失败保护：连续 %s 次「所有引擎都失败」即停止任务（0 = 关闭）"
+             % (fail_fast_threshold(settings) or "已关闭"))
     # v1.2.7 起超时与重试不再出现在设置页，各引擎用自己的默认值 —— 这里把实际生效的
     # 值逐个列出来，否则"没得改"就成了"没法查"。
     engines_in_use = getattr(router, "engines", None) or []
@@ -470,6 +525,11 @@ def main():
         from config import Settings
         settings = Settings()
 
+    # Stash 只给插件一个会话 Cookie，而它有过期时间（默认 1 小时）。设置页填了
+    # API Key 就补上 —— 它是长期有效的 JWT，长任务不会被会话过期打断。
+    api.use_api_key(settings["stash_api_key"])
+    log.info("Stash 连接：%s（认证：%s）" % (api.endpoint, api.auth_label()))
+
     # 默认值初始化：设置项清单声明不了默认值，没填过的键在设置页显示为空
     # （NUMBER 渲染成 0，像"默认值没生效"）。这里把默认值补写进插件配置，
     # UI 上就能看到、也能直接改。只补空缺，绝不覆盖用户已填的值；失败不影响任务。
@@ -499,7 +559,7 @@ def main():
             result = ("设置页默认值已就绪，无需写入（全部键都有值）" if not seeded
                       else "已写入 %d 项默认值：%s" % (len(seeded), ", ".join(sorted(seeded))))
         elif mode == "selftest":
-            result = run_selftest(settings, router)
+            result = run_selftest(api, settings, router)
         elif mode == "rollback":
             result = run_rollback(api, settings, dry_run)
         elif mode == "single":

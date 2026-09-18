@@ -224,6 +224,10 @@ class StubRouter:
     def test_all(self, sample="Hello"):
         return [("EDGE（桩）", True, "译文", 1)]
 
+    def stop_exception(self):
+        """桩：不模拟"全链停用"，返回 None 表示还能继续跑。"""
+        return None
+
 
 # --------------------------------------------------------------------------- #
 # 驱动插件
@@ -538,9 +542,10 @@ def main():
     check("默认开启引擎熔断", blank.engine_options()["engine_skip_after"] == 3)
 
     # v1.2.6：主翻译引擎设置已取消，只剩一条引擎链
-    chained = config_mod.load_settings(FakeApi({"engine_fallback": "deepl, google ; mymemory，baidu"}), {})
+    chained = config_mod.load_settings(FakeApi({"engine_fallback": "deepl, google ; libretranslate，baidu"}), {})
     check("引擎链按顺序生效",
-          chained.engine_chain == ["deepl", "google", "mymemory", "baidu"], str(chained.engine_chain))
+          chained.engine_chain == ["deepl", "google", "libretranslate", "baidu"],
+          str(chained.engine_chain))
     check("引擎链去重",
           config_mod.load_settings(FakeApi({"engine_fallback": "google,google, google"}), {}).engine_chain
           == ["google"])
@@ -555,9 +560,9 @@ def main():
     legacy = config_mod.load_settings(FakeApi({"engine": "deepl"}), {})
     check("旧版主引擎键在链留空时被当作链首",
           legacy.engine_chain == ["deepl"], str(legacy.engine_chain))
-    both = config_mod.load_settings(FakeApi({"engine": "edge", "engine_fallback": "mymemory,google"}), {})
+    both = config_mod.load_settings(FakeApi({"engine": "edge", "engine_fallback": "deepl,google"}), {})
     check("链一旦填了，旧的主引擎键就被忽略",
-          both.engine_chain == ["mymemory", "google"], str(both.engine_chain))
+          both.engine_chain == ["deepl", "google"], str(both.engine_chain))
 
     # 自检任务要能说清"这条链是从哪来的"（默认值在代码里，不看日志根本猜不到）
     check("引擎链来源说明标出「设置页」",
@@ -750,31 +755,45 @@ def main():
           "libretranslate_url" not in seeds_lt, str(sorted(seeds_lt)))
 
     # ------------------------------------------------------------------ #
-    print("\n16) MyMemory 500 字节预检：超限跳过，不发请求不计失败（v1.2.9）")
+    print("\n16) 单次字节上限预检：超限跳过，不发请求不计失败")
+    # 机制留在这里（曾经是 MyMemory 的 500 字节上限专用），用桩引擎验证：
+    # 上限是引擎固有属性，不是故障 —— 超限的文本应当被静默跳过。
     _real_http = engines_mod.http_request
 
     def _must_not_request(*args, **kwargs):
         raise AssertionError("超限文本不应发出请求")
 
-    engines_mod.http_request = _must_not_request
-    router = engines_mod.Router(["mymemory"], {})
-    check("MyMemory 引擎可用（匿名）", router.has_engine())
-    try:
-        router.translate("x" * 600)
-        check("超限文本全部引擎跳过应抛错", False)
-    except EngineError as exc:
-        check("超限文本报错信息含「已跳过」", "已跳过" in str(exc), str(exc))
-    check("超限不计失败（不触发熔断）", not router._benched and not router._fail_streak,
-          str(router._fail_streak))
-    check("超限未发出任何请求", True)  # http_request 被替换成必炸桩，走到这说明没发
-    engines_mod.http_request = _real_http
+    class _CappedEngine(engines_mod.BaseEngine):
+        name = "capped"
+        max_source_bytes = 500
 
-    # 正常长度仍能正常请求（stub 返回译文）
-    engines_mod.http_request = lambda *a, **k: (200, b'{"responseData":{"translatedText":"hi"},"responseStatus":200}')
-    router2 = engines_mod.Router(["mymemory"], {})
-    out = router2.translate("hello")
-    check("正常长度照常请求", out.engine == "mymemory" and out.text, str(out))
-    engines_mod.http_request = _real_http
+        def translate_detailed(self, text, source="auto", target="zh-CN"):
+            engines_mod.http_request("https://example.invalid/probe")   # 走到这说明预检失效
+            return "hi", None
+
+    engines_mod.ENGINE_CLASSES["capped"] = _CappedEngine
+    engines_mod.ENGINE_LABELS["capped"] = "上限桩"
+    try:
+        engines_mod.http_request = _must_not_request
+        router = engines_mod.Router(["capped"], {})
+        check("桩引擎可用", router.has_engine())
+        try:
+            router.translate("x" * 600)
+            check("超限文本全部引擎跳过应抛错", False)
+        except EngineError as exc:
+            check("超限文本报错信息含「已跳过」", "已跳过" in str(exc), str(exc))
+        check("超限不计失败（不触发熔断）", not router._benched and not router._fail_streak,
+              str(router._fail_streak))
+
+        # 正常长度仍能正常请求（stub 返回 ok）
+        engines_mod.http_request = lambda *a, **k: (200, b"{}")
+        router2 = engines_mod.Router(["capped"], {})
+        out = router2.translate("hello")
+        check("正常长度照常请求", out.engine == "capped" and out.text, str(out))
+    finally:
+        engines_mod.http_request = _real_http
+        engines_mod.ENGINE_CLASSES.pop("capped", None)
+        engines_mod.ENGINE_LABELS.pop("capped", None)
 
     server.shutdown()
     if os.path.exists(cache_file):

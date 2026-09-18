@@ -230,9 +230,10 @@ def main():
     # v1.2.7：deepl_api_url 已放回设置页（接口地址段）；
     #         超时与重试三项彻底撤掉（改为各引擎自己的默认值，不在 DEFAULTS 里）
     # v1.2.8：lingva 引擎整体移除，lingva_instance 不复存在
+    # v1.3.0：mymemory 引擎整体移除（连带 mymemory_email / mymemory_url）
     hidden_from_ui = {
         "engine_skip_after", "cache_enabled",
-        "mymemory_email", "tencent_region", "alibaba_region",
+        "tencent_region", "alibaba_region",
         "http_proxy",
     }
     missing = sorted(set(DEFAULTS) - set(settings) - hidden_from_ui)

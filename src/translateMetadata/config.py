@@ -36,7 +36,7 @@ query PluginSettings($include: [ID!]) {
 # 取舍：付费云服务（质量稳、有额度）→ DeepL / AI → 免费兜底。
 # --------------------------------------------------------------------------- #
 DEFAULT_ENGINE_CHAIN = ("tencent", "alibaba", "baidu", "deepl", "openai",
-                        "mymemory", "google")
+                        "google")
 
 DEFAULTS = {
     # 引擎
@@ -64,6 +64,9 @@ DEFAULTS = {
     "batch_size": 100,
     "cache_enabled": True,
     "http_proxy": "",
+    # Stash 自身的 API Key（可选）：会话 Cookie 有硬性有效期（默认 1 小时），
+    # 超长批量任务建议填上，见 stash_api.py 顶部的说明。留空 = 只用会话 Cookie。
+    "stash_api_key": "",
     # 凭证
     "baidu_appid": "",
     "baidu_key": "",
@@ -75,10 +78,9 @@ DEFAULTS = {
     "alibaba_region": "mt.aliyuncs.com",
     "libretranslate_url": "http://localhost:5000",
     "libretranslate_api_key": "",
-    # DeepL / MyMemory
+    # DeepL
     "deepl_api_key": "",
     "deepl_api_url": "",
-    "mymemory_email": "",
     # AI 翻译（OpenAI 兼容）
     "openai_base_url": "",
     "openai_api_key": "",
@@ -91,19 +93,41 @@ DEFAULTS = {
     "baidu_url": "",
     "tencent_url": "",
     "alibaba_url": "",
-    "mymemory_url": "",
 }
 
 # --------------------------------------------------------------------------- #
 # 只能从任务参数传的键
 #
-# v1.2.7 起这三项从设置页撤掉了：超时与重试按「各引擎自己的默认值」走
+# v1.2.7 起前三项从设置页撤掉了：超时与重试按「各引擎自己的默认值」走
 # （机翻 20s / 1 次，AI 120s / 1 次，见 engines.py），单次实际翻译上限默认不限。
 # 偶尔仍需要临时收口时（比如先试跑 20 条），在任务的 defaultArgs 里传即可：
 #   {"max_items": "20"} / {"timeout_s": "45"} / {"retry_times": "0"}
+#   {"fail_fast_after": "1"}  —— 连续失败几次就停（默认 3，0 = 关闭该保护）
 # 它们不在 DEFAULTS 里，所以不会被设置页的空值覆盖，只有显式传入才生效。
 # --------------------------------------------------------------------------- #
-ARG_ONLY_KEYS = ("max_items", "timeout_s", "retry_times", "retry_backoff_ms")
+ARG_ONLY_KEYS = ("max_items", "timeout_s", "retry_times", "retry_backoff_ms",
+                 "fail_fast_after")
+
+# 连续多少次「所有引擎都失败」就停下任务。
+#
+# 引擎链整条走完仍然失败，说明是凭证 / 额度 / 代理这类全局问题，再往下扫库
+# 只会把日志刷满、把时间耗光（线上真跑过：全库 6000 多条的每一条都在报同样的错）。
+# 设成 3 是给瞬时抖动留一点余地；填 0 表示关闭这个保护（任务参数 fail_fast_after）。
+FAIL_FAST_AFTER_DEFAULT = 3
+
+
+def fail_fast_threshold(settings):
+    """读出连续失败阈值：None/空 = 没填（用默认 3），0 = 显式关闭。
+
+    必须把"没填"和"填 0"分开，所以不能写 `value or 默认值`（0 会被吞掉）。
+    """
+    value = settings.get("fail_fast_after")
+    if value in (None, ""):
+        return FAIL_FAST_AFTER_DEFAULT
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return FAIL_FAST_AFTER_DEFAULT
 
 # --------------------------------------------------------------------------- #
 # 旧键名兼容
@@ -277,7 +301,6 @@ class Settings:
             "libretranslate_api_key": to_str(self._values.get("libretranslate_api_key")),
             "deepl_api_key": to_str(self._values.get("deepl_api_key")),
             "deepl_api_url": to_str(self._values.get("deepl_api_url")),
-            "mymemory_email": to_str(self._values.get("mymemory_email")),
             "openai_base_url": to_str(self._values.get("openai_base_url")),
             "openai_api_key": to_str(self._values.get("openai_api_key")),
             "openai_model": to_str(self._values.get("openai_model")),
@@ -288,7 +311,6 @@ class Settings:
             "baidu_url": to_str(self._values.get("baidu_url")),
             "tencent_url": to_str(self._values.get("tencent_url")),
             "alibaba_url": to_str(self._values.get("alibaba_url")),
-            "mymemory_url": to_str(self._values.get("mymemory_url")),
         }
 
         # 超时 / 重试这三个键设置页里没有了，只有任务参数显式给了才往下传，
@@ -482,7 +504,6 @@ def _init_defaults():
         "baidu_url": engines.BaiduEngine.API_URL,
         "tencent_url": "https://" + engines.TENCENT_DEFAULT_HOST,
         "alibaba_url": "https://" + engines.AlibabaEngine.DEFAULT_HOST,
-        "mymemory_url": engines.MyMemoryEngine.API_URL,
         # 注意：libretranslate_url 故意不种 —— 它没有公共实例，"默认" localhost:5000
         # 种进配置会顶掉用户从旧插件键迁移来的真实地址（v1.2.8 就这么坑过一回）。
         # AI

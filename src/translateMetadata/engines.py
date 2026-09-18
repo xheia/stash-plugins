@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""翻译引擎：EDGE、Google、百度、腾讯云 TMT、阿里云机器翻译、LibreTranslate。
+"""翻译引擎：EDGE、Google、百度、腾讯云 TMT、阿里云机器翻译、LibreTranslate、
+DeepL、AI 翻译（OpenAI 兼容）。
 
 只依赖 Python 标准库（urllib / hashlib / hmac / json / time / uuid），无需 pip 安装任何东西。
 
@@ -15,6 +16,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import http.client
 import json
 import re
 import time
@@ -24,10 +26,88 @@ import urllib.request
 import uuid
 
 import detect
+import log
 
 
 class EngineError(Exception):
     """引擎调用失败。上层会据此切换到下一个引擎。"""
+
+
+class EngineCredentialsError(EngineError):
+    """凭证无效 / 未授权 —— 同样重试无意义，本轮直接停用该引擎。
+
+    和额度类分开只是为了把提示写清楚：一个是"去充值"，一个是"去核对 Key"。
+    """
+
+
+class EngineQuotaError(EngineError):
+    """"没额度了"类失败 —— 重试没有意义，本轮直接停用该引擎。
+
+    单独一个类型是因为处理方式完全不同：
+      * 网络抖动 / 限流  → 换一条链路或换下一个引擎，值得再试
+      * 额度耗尽 / 欠费 / 未开通 → 试一万次也一样，本轮拉黑它；
+        整条链都这样时应当**停止任务**并明确告诉用户"无额度"，
+        而不是把全库几千条扫完、每条都刷一句同样的错。
+    """
+
+
+# 额度 / 账户状态类信号：命中任一即认定「这个引擎本轮别再用了」。
+# 前半段是各家 API 的错误码（原文会带在报错里），后半段是各家返回的自然语言。
+QUOTA_SIGNALS = (
+    # 腾讯云 TMT
+    "failedoperation.nofreeamount", "failedoperation.freeamountusedup",
+    "failedoperation.insufficientbalance", "failedoperation.userunactivated",
+    "resourceinsufficient", "resourceunavailable.inadequatebalance",
+    # 百度翻译（54004 余额不足、58002 服务已关闭）
+    "54004", "58002",
+    # 阿里云（未开通 / 欠费）
+    "invalidaccountstatus", "invalidaccountstatus.notactivated",
+    "invalidaccountstatus.unpaid",
+    # DeepL（456 = 配额用尽）与通用措辞
+    "http 456", "quota", "insufficient balance", "insufficient_balance",
+    "no free amount", "free amount", "not activated", "unactivated",
+    "unpaid", "arrears", "exhausted", "usage limit", "daily limit",
+    "余额不足", "余额已用完", "额度已用完", "额度耗尽", "免费额度",
+    "配额", "欠费", "未开通", "服务已关闭", "服务当前已关闭", "账户异常",
+)
+
+
+# 凭证 / 鉴权类信号：这些也一样"重试一万次还是错"，本轮直接停用该引擎。
+# 少了这条，一个 Key 填错的引擎会在每条文本上白打一次请求 —— 既浪费时间也浪费额度。
+CREDENTIAL_SIGNALS = (
+    "http 401", "http 403", "unauthorized", "unauthenticated",
+    "invalid api key", "invalid apikey", "invalid access key", "invalidaccesskeyid",
+    "signaturedoesnotmatch", "invalid signature", "authfailure", "invalidcredential",
+    "authentication failed", "permission denied",
+    # 百度 52003 未授权用户 / 54001 签名错误
+    "52003", "54001",
+    "认证失败", "未授权", "签名错误", "密钥无效", "凭证无效", "key 无效",
+)
+
+
+def looks_like_quota(text):
+    """错误文本是否指向「额度 / 账户」而不是「网络 / 限流」。"""
+    text = (text or "").lower()
+    return any(signal in text for signal in QUOTA_SIGNALS)
+
+
+def looks_like_credentials(text):
+    """错误文本是否指向「凭证 / 鉴权」。"""
+    text = (text or "").lower()
+    return any(signal in text for signal in CREDENTIAL_SIGNALS)
+
+
+def api_error(message):
+    """按错误文本挑异常类型。
+
+    引擎内部统一用它抛错，Router 就不必逐个引擎判断，也能保证"带原始错误码的
+    报错"被正确归类成"额度类 / 凭证类 / 普通失败"，从而走对应处理。
+    """
+    if looks_like_quota(message):
+        return EngineQuotaError(message)
+    if looks_like_credentials(message):
+        return EngineCredentialsError(message)
+    return EngineError(message)
 
 
 # --------------------------------------------------------------------------- #
@@ -35,15 +115,15 @@ class EngineError(Exception):
 # 各引擎自己的写法在这里翻译。
 # --------------------------------------------------------------------------- #
 LANG_MAP = {
-    "zh-CN": {"edge": "zh-Hans", "google": "zh-CN", "baidu": "zh", "tencent": "zh", "alibaba": "zh", "libretranslate": "zh", "deepl": "ZH", "mymemory": "zh-CN", "openai": "zh-CN"},
-    "zh": {"edge": "zh-Hans", "google": "zh-CN", "baidu": "zh", "tencent": "zh", "alibaba": "zh", "libretranslate": "zh", "deepl": "ZH", "mymemory": "zh-CN", "openai": "zh-CN"},
-    "zh-Hans": {"edge": "zh-Hans", "google": "zh-CN", "baidu": "zh", "tencent": "zh", "alibaba": "zh", "libretranslate": "zh", "deepl": "ZH", "mymemory": "zh-CN", "openai": "zh-CN"},
-    "zh-TW": {"edge": "zh-Hant", "google": "zh-TW", "baidu": "cht", "tencent": "zh-TW", "alibaba": "zh-tw", "libretranslate": "zt", "deepl": "ZH", "mymemory": "zh-TW", "openai": "zh-TW"},
-    "zh-Hant": {"edge": "zh-Hant", "google": "zh-TW", "baidu": "cht", "tencent": "zh-TW", "alibaba": "zh-tw", "libretranslate": "zt", "deepl": "ZH", "mymemory": "zh-TW", "openai": "zh-TW"},
-    "en": {"edge": "en", "google": "en", "baidu": "en", "tencent": "en", "alibaba": "en", "libretranslate": "en", "deepl": "EN", "mymemory": "en", "openai": "en"},
-    "ja": {"edge": "ja", "google": "ja", "baidu": "jp", "tencent": "ja", "alibaba": "ja", "libretranslate": "ja", "deepl": "JA", "mymemory": "ja", "openai": "ja"},
-    "ko": {"edge": "ko", "google": "ko", "baidu": "kor", "tencent": "ko", "alibaba": "ko", "libretranslate": "ko", "deepl": "KO", "mymemory": "ko", "openai": "ko"},
-    "ru": {"edge": "ru", "google": "ru", "baidu": "ru", "tencent": "ru", "alibaba": "ru", "libretranslate": "ru", "deepl": "RU", "mymemory": "ru", "openai": "ru"},
+    "zh-CN": {"edge": "zh-Hans", "google": "zh-CN", "baidu": "zh", "tencent": "zh", "alibaba": "zh", "libretranslate": "zh", "deepl": "ZH", "openai": "zh-CN"},
+    "zh": {"edge": "zh-Hans", "google": "zh-CN", "baidu": "zh", "tencent": "zh", "alibaba": "zh", "libretranslate": "zh", "deepl": "ZH", "openai": "zh-CN"},
+    "zh-Hans": {"edge": "zh-Hans", "google": "zh-CN", "baidu": "zh", "tencent": "zh", "alibaba": "zh", "libretranslate": "zh", "deepl": "ZH", "openai": "zh-CN"},
+    "zh-TW": {"edge": "zh-Hant", "google": "zh-TW", "baidu": "cht", "tencent": "zh-TW", "alibaba": "zh-tw", "libretranslate": "zt", "deepl": "ZH", "openai": "zh-TW"},
+    "zh-Hant": {"edge": "zh-Hant", "google": "zh-TW", "baidu": "cht", "tencent": "zh-TW", "alibaba": "zh-tw", "libretranslate": "zt", "deepl": "ZH", "openai": "zh-TW"},
+    "en": {"edge": "en", "google": "en", "baidu": "en", "tencent": "en", "alibaba": "en", "libretranslate": "en", "deepl": "EN", "openai": "en"},
+    "ja": {"edge": "ja", "google": "ja", "baidu": "jp", "tencent": "ja", "alibaba": "ja", "libretranslate": "ja", "deepl": "JA", "openai": "ja"},
+    "ko": {"edge": "ko", "google": "ko", "baidu": "kor", "tencent": "ko", "alibaba": "ko", "libretranslate": "ko", "deepl": "KO", "openai": "ko"},
+    "ru": {"edge": "ru", "google": "ru", "baidu": "ru", "tencent": "ru", "alibaba": "ru", "libretranslate": "ru", "deepl": "RU", "openai": "ru"},
 }
 
 # 引擎返回的语言里，哪些算「中文」——用于丢弃「其实原文就是中文」的翻译结果
@@ -145,6 +225,50 @@ def brief(text, limit=160):
 # --------------------------------------------------------------------------- #
 # HTTP 基础
 # --------------------------------------------------------------------------- #
+# 走哪条链路成功过 —— 同一个目标 + 同一份代理配置，不必每次从头试。
+# 键：(host, 首选代理)，值：能用的链路标签。
+_ROUTE_CACHE = {}
+
+# 网络层的异常（超时、连接被重置、TLS 握手失败、EOF、DNS 失败……）。
+# 注意 urllib.error.HTTPError 也是 URLError/OSError 的子类，
+# 所以必须在外层先把它拦住，别让它落到这里被当成"网络故障"去换链路。
+NETWORK_EXCEPTIONS = (urllib.error.URLError, OSError, http.client.HTTPException)
+
+
+def _build_opener(route):
+    """route = "" 表示强制直连；否则是代理地址（空串之外的都会走指定代理）。"""
+    if route:
+        handlers = [urllib.request.ProxyHandler({"http": route, "https": route})]
+    else:
+        handlers = [urllib.request.ProxyHandler({})]
+    return urllib.request.build_opener(*handlers)
+
+
+def _routes(proxy, host):
+    """可尝试的链路列表，按优先级：[(标签, 代理地址或 "")]。
+
+    用户填了代理就以代理为首选、直连为备选；没填则"系统默认（可能来自环境变量）"
+    为首选、强制直连为备选。内网地址（LibreTranslate 跑在 NAS 上这类）只有直连。
+
+    换链路的触发条件是**网络层失败**（超时 / 连接重置 / TLS 失败 / DNS 失败），
+    这正好覆盖「某条链路对某个域名不通」的常见情形 ——
+    比如 DeepL/EDGE 直连被重置，而走代理就通；或者代理节点挂了，直连反而能用。
+    """
+    if is_local_host(host):
+        return [("直连（内网地址）", "")]
+    if proxy:
+        return [("代理 %s" % proxy, proxy), ("直连", "")]
+    env = urllib.request.getproxies() or {}
+    if env.get("http") or env.get("https"):
+        # 没手动填代理，但环境变量里有 —— 它也可能是坏的，直连作为备选
+        return [("系统默认链路", None), ("直连", "")]
+    return [("直连", "")]
+
+
+def _route_key(host, proxy):
+    return "%s|%s" % (host, proxy or "")
+
+
 def http_request(url, method="GET", headers=None, data=None, timeout=20, proxy="",
                  retries=0, backoff_ms=800):
     """发起一次 HTTP 请求，返回 (状态码, 响应字节)。
@@ -167,35 +291,69 @@ def http_request(url, method="GET", headers=None, data=None, timeout=20, proxy="
     if proxy and is_local_host(host):
         proxy = ""      # 内网地址直连
 
-    if proxy:
-        handlers = [urllib.request.ProxyHandler({"http": proxy, "https": proxy})]
-    else:
-        # 不传代理时沿用环境变量里的设置（保持默认行为）
-        handlers = [urllib.request.ProxyHandler()]
-    opener = urllib.request.build_opener(*handlers)
+    routes = _routes(proxy, host)
+    key = _route_key(host, proxy)
+    known = _ROUTE_CACHE.get(key)
+    if known:
+        for index, (label, _) in enumerate(routes):
+            if label == known:
+                routes = routes[index:] + routes[:index]
+                break
 
-    attempts = max(1, int(retries) + 1)
-    for attempt in range(attempts):
-        try:
-            with opener.open(req, timeout=timeout) as resp:
-                return resp.status, resp.read()
-        except urllib.error.HTTPError as exc:
-            detail = ""
+    # 请求预算：**一段文本在这一个引擎上，最多只发这么多次 HTTP**。
+    # 重试与换链路共用同一份预算，绝不叠加 —— 早先两者各自计数，
+    # 最坏会变成 (重试次数+1) × 链路数，一次翻译打出 4 个请求，额度掉得莫名其妙。
+    budget = max(1, int(retries) + 1)
+    total_budget = budget
+    last_error = None
+
+    while routes and budget > 0:
+        label, route = routes.pop(0)
+        # route is None 表示"不指定代理"，沿用环境变量里的设置（保持默认行为）
+        opener = (_build_opener(route) if route is not None
+                  else urllib.request.build_opener(urllib.request.ProxyHandler()))
+        while budget > 0:
+            budget -= 1
             try:
-                detail = brief(exc.read().decode("utf-8", "replace"))
-            except Exception:
-                pass
-            if exc.code in TRANSIENT_STATUS and attempt + 1 < attempts:
-                time.sleep(backoff_ms * (attempt + 1) / 1000.0)
-                continue
-            suffix = "（服务端限流，稍后重试或改用其它引擎）" if exc.code == 429 else ""
-            raise EngineError("HTTP %s %s%s" % (exc.code, detail, suffix)) from exc
-        except urllib.error.URLError as exc:
-            raise EngineError("网络错误: %s" % (exc.reason,)) from exc
-        except Exception as exc:  # 超时等
-            raise EngineError("请求失败: %s" % (exc,)) from exc
+                with opener.open(req, timeout=timeout) as resp:
+                    _ROUTE_CACHE[key] = label
+                    return resp.status, resp.read()
+            except urllib.error.HTTPError as exc:
+                detail = ""
+                try:
+                    detail = brief(exc.read().decode("utf-8", "replace"))
+                except Exception:
+                    pass
+                suffix = "（服务端限流，稍后重试或改用其它引擎）" if exc.code == 429 else ""
+                failure = api_error("HTTP %s %s%s" % (exc.code, detail, suffix))
+                if exc.code in TRANSIENT_STATUS and budget > 0:
+                    # 限流 / 5xx：等一会儿再试。还有别的链路就换链路
+                    # （换个出口 IP 比在原地重试更容易过），否则原地重试。
+                    time.sleep(backoff_ms * (total_budget - budget) / 1000.0)
+                    last_error = failure
+                    if routes:
+                        break
+                    continue
+                raise failure from exc
+            except NETWORK_EXCEPTIONS as exc:
+                last_error = exc
+                break       # 网络层失败：不在这条链路上继续耗，换链路
+            except Exception as exc:  # 兜底（超时等）
+                last_error = exc
+                break
 
-    raise EngineError("请求失败：重试次数已用尽")
+        if routes and budget > 0:
+            nxt = routes[0][0]
+            log.warning("网络异常（%s）：%s；改用另一条链路重试（%s）"
+                        % (label, brief(str(last_error), 120), nxt))
+
+    if isinstance(last_error, EngineError):
+        # 预算花在了限流/5xx 上：把最后一次的真实原因抛出去（保留额度/凭证分类）
+        raise last_error
+    reason = getattr(last_error, "reason", None) or last_error
+    if last_error is None:
+        raise EngineError("请求未发出（没有可用链路）")
+    raise EngineError("网络错误（各条链路都不通）: %s" % (reason,))
 
 
 def json_request(url, method="POST", headers=None, payload=None, timeout=20, proxy="",
@@ -620,8 +778,9 @@ class TencentEngine(BaseEngine):
         resp = data.get("Response") or {}
         if resp.get("Error"):
             err = resp["Error"]
-            raise EngineError("腾讯云报错 %s: %s（host=%s, region=%s）"
-                              % (err.get("Code"), err.get("Message"), self.host, self.region))
+            # FailedOperation.NoFreeAmount / InsufficientBalance 等会被归成"额度类"
+            raise api_error("腾讯云报错 %s: %s（host=%s, region=%s）"
+                            % (err.get("Code"), err.get("Message"), self.host, self.region))
 
         translated = resp.get("TargetText")
         if not translated:
@@ -676,6 +835,8 @@ class AlibabaEngine(BaseEngine):
                 host = "mt.%s.aliyuncs.com" % raw
         self.host = (host or self.DEFAULT_HOST).strip("/")
         self.endpoint = "https://" + self.host + "/"
+        # 本账号是否支持 SourceLanguage=auto（首次失败后记下来，避免每条都试）
+        self._auto_unsupported = False
         # 从 mt.cn-hangzhou.aliyuncs.com 里抠出 cn-hangzhou 作为 RegionId
         if not self.region_id and self.host.startswith("mt.") and self.host.endswith(".aliyuncs.com"):
             self.region_id = self.host[len("mt."):-len(".aliyuncs.com")] or ""
@@ -769,16 +930,23 @@ class AlibabaEngine(BaseEngine):
                 "FormatType": self.FORMAT_TYPE,
             })
 
-        try:
-            data = call(requested)
-        except EngineError:
-            # 通用版对 auto 的支持视账号/接口版本而定：失败就先检测语言再重试一次
-            if requested != "auto":
-                raise
+        if requested == "auto" and self._auto_unsupported:
+            # 本账号已知不支持 auto：直接先检测语言，别再白打一次注定失败的请求
             detected_lang = self.detect(text)
-            if not detected_lang:
-                raise
-            data = call(detected_lang)
+            data = call(detected_lang or "auto")
+        else:
+            try:
+                data = call(requested)
+            except EngineError:
+                # 通用版对 auto 的支持视账号/接口版本而定：
+                # 失败就先检测语言再试一次，并记住这个账号不支持 auto
+                if requested != "auto":
+                    raise
+                self._auto_unsupported = True
+                detected_lang = self.detect(text)
+                if not detected_lang:
+                    raise
+                data = call(detected_lang)
 
         payload = data.get("Data") or {}
         translated = payload.get("Translated")
@@ -902,10 +1070,11 @@ class DeepLEngine(BaseEngine):
             raise EngineError("DeepL 认证失败 (HTTP 403)：Key 无效或填错档位"
                               "（免费 Key 必须走 api-free.deepl.com）")
         if status == 456:
-            raise EngineError("DeepL 配额已用完 (HTTP 456)：本月免费额度耗尽，"
-                              "下月恢复或改用其它引擎")
+            raise EngineQuotaError("DeepL 配额已用完 (HTTP 456)：本月免费额度耗尽，"
+                                   "下月恢复或改用其它引擎")
         if status != 200:
-            raise EngineError("DeepL HTTP %s: %s" % (status, data.get("message") or brief(raw.decode("utf-8", "replace"))))
+            raise api_error("DeepL HTTP %s: %s"
+                            % (status, data.get("message") or brief(raw.decode("utf-8", "replace"))))
 
         translations = data.get("translations") or []
         if not translations or not translations[0].get("text"):
@@ -914,65 +1083,7 @@ class DeepLEngine(BaseEngine):
 
 
 # --------------------------------------------------------------------------- #
-# 8. MyMemory —— 匿名免费（约 1000 词/天/IP），无需任何注册
-#    填 mymemory_email（任意邮箱）可提升到约 5 万词/天。
-#    限制：单次请求原文不超过 500 字节，超长文本请交给其它引擎。
-# --------------------------------------------------------------------------- #
-class MyMemoryEngine(BaseEngine):
-    name = "mymemory"
-    API_URL = "https://api.mymemory.translated.net/get"
-    max_source_bytes = 500
-
-    def __init__(self, options=None):
-        super().__init__(options)
-        options = options or {}
-        self.email = (options.get("mymemory_email") or "").strip()
-        self.api_url = self.custom_url("mymemory_url", self.API_URL)
-
-    def translate_detailed(self, text, source="auto", target="zh-CN"):
-        if len(text.encode("utf-8")) > 500:
-            raise EngineError("原文超过 MyMemory 单次 500 字节上限，请换其它引擎")
-
-        params = {
-            "q": text,
-            # MyMemory 接受 Autodetect 作为源语言
-            "langpair": "%s|%s" % (
-                self.lang(source) if source and source != "auto" else "Autodetect",
-                self.lang(target),
-            ),
-        }
-        if self.email:
-            params["de"] = self.email
-
-        url = self.api_url + "?" + urllib.parse.urlencode(params)
-        self._throttle()
-        status, raw = http_request(
-            url,
-            headers={"Accept": "application/json"},
-            timeout=self.timeout,
-            proxy=self.proxy,
-            retries=self.retries,
-            backoff_ms=self.backoff_ms,
-        )
-        try:
-            data = json.loads(raw.decode("utf-8", "replace"))
-        except ValueError as exc:
-            raise EngineError("MyMemory 响应不是 JSON: %s" % (raw[:200],)) from exc
-
-        detail = str(data.get("responseDetails") or "")
-        status_code = str(data.get("responseStatus") or "")
-        if status_code not in ("200", "200 ") and status_code.strip() != "200":
-            raise EngineError("MyMemory 报错 %s: %s" % (status_code, detail or data))
-        translated = (data.get("responseData") or {}).get("translatedText")
-        # 拒绝 MyMemory 塞在译文位置的配额告警文本
-        if not translated or "MYMEMORY WARNING" in translated.upper() \
-                or "QUERY LENGTH LIMIT" in translated.upper():
-            raise EngineError("MyMemory 未返回有效译文: %s" % (translated or detail or data))
-        return translated, None
-
-
-# --------------------------------------------------------------------------- #
-# 9. AI 翻译（OpenAI 兼容接口）—— 一个配置通吃所有兼容端点：
+# 8. AI 翻译（OpenAI 兼容接口）—— 一个配置通吃所有兼容端点：
 #     OpenAI / DeepSeek / 智谱 / Kimi / 通义 / OpenRouter / Ollama / LM Studio ...
 #     只要把「接口地址 + API Key + 模型名」填对即可。LLM 翻译质量通常
 #     远好于传统机翻，且能理解上下文、保留专有名词。
@@ -1092,7 +1203,6 @@ ENGINE_CLASSES = {
     AlibabaEngine.name: AlibabaEngine,
     LibreTranslateEngine.name: LibreTranslateEngine,
     DeepLEngine.name: DeepLEngine,
-    MyMemoryEngine.name: MyMemoryEngine,
     OpenAIEngine.name: OpenAIEngine,
 }
 
@@ -1104,7 +1214,6 @@ ENGINE_LABELS = {
     "alibaba": "阿里云机器翻译",
     "libretranslate": "LibreTranslate",
     "deepl": "DeepL（免费档，需 API Key）",
-    "mymemory": "MyMemory（匿名免费）",
     "openai": "AI 翻译（OpenAI 兼容）",
 }
 
@@ -1140,6 +1249,10 @@ class Router:
         self.skip_after = max(0, int(options.get("engine_skip_after") or 0))
         self._fail_streak = {}
         self._benched = []
+        # 本轮直接停用的引擎：name -> 原因分类（"额度" / "凭证"）。
+        # 停用 != 熔断：熔断是"连续失败若干次后暂时歇一会儿"，这里是一次定性 ——
+        # 没额度 / Key 错了，后面每条文本再试都是白打请求。
+        self._disabled = {}
 
         for name in engine_names:
             name = (name or "").strip().lower()
@@ -1161,6 +1274,43 @@ class Router:
         """本轮被熔断跳过的引擎。"""
         return list(self._benched)
 
+    def out_of_quota_names(self):
+        """本轮因额度 / 账户问题被停用的引擎。"""
+        return [name for name, kind in self._disabled.items() if kind == "额度"]
+
+    def unusable_names(self):
+        return list(self._disabled)
+
+    def all_out_of_quota(self):
+        """链上所有引擎都是因为额度 / 账户问题停用的。"""
+        return bool(self.engines) and all(
+            self._disabled.get(engine.name) == "额度" for engine in self.engines)
+
+    def stop_exception(self):
+        """链上引擎全被停用时给出该抛的异常，否则 None。
+
+        全链停用意味着"继续扫库只是白费时间"，任务应当立刻停止 ——
+        额度用尽给 EngineQuotaError（提示"无额度"），凭证问题给 EngineCredentialsError。
+        """
+        if not self.engines or not all(
+                engine.name in self._disabled for engine in self.engines):
+            return None
+        message = "所有可用引擎都已停用（%s）" % self.reason_summary()
+        if self.all_out_of_quota():
+            return EngineQuotaError(message)
+        return EngineCredentialsError(message)
+
+    def reason_summary(self):
+        """把停用原因按类型归拢成一句人话。"""
+        quota = self.out_of_quota_names()
+        creds = [n for n, kind in self._disabled.items() if kind == "凭证"]
+        parts = []
+        if quota:
+            parts.append("额度已用完 / 账户不可用：%s" % ", ".join(quota))
+        if creds:
+            parts.append("凭证无效 / 未授权：%s" % ", ".join(creds))
+        return "；".join(parts) or "原因未知"
+
     # -- 熔断计数 ---------------------------------------------------------- #
     def _note_failure(self, name):
         streak = self._fail_streak.get(name, 0) + 1
@@ -1171,6 +1321,28 @@ class Router:
 
     def _note_success(self, name):
         self._fail_streak[name] = 0
+
+    def _mark_unusable(self, name, kind, detail=""):
+        """把引擎标记为"本轮别再用了"（只提示一次）。"""
+        if name in self._disabled:
+            return
+        self._disabled[name] = kind
+        self._fail_streak[name] = 0
+        hint = ("去充值 / 换一个还有额度的引擎" if kind == "额度"
+                else "去核对 API Key / 密钥")
+        log.warning("「%s」本轮停用（%s）：%s —— %s"
+                    % (name, kind, brief(detail, 160), hint))
+
+    def classify_and_mark(self, name, detail, exc=None):
+        """按错误内容把引擎标记成不可用；能识别才标记，返回是否标记了。"""
+        text = str(exc if exc is not None else detail)
+        if isinstance(exc, EngineQuotaError) or looks_like_quota(text):
+            self._mark_unusable(name, "额度", detail)
+            return True
+        if isinstance(exc, EngineCredentialsError) or looks_like_credentials(text):
+            self._mark_unusable(name, "凭证", detail)
+            return True
+        return False
 
     def translate(self, text, source="auto", target="zh-CN"):
         """依次尝试各引擎，返回 TranslateResult；全部失败抛 EngineError。"""
@@ -1185,10 +1357,11 @@ class Router:
         errors = []
         source_bytes = len(text.encode("utf-8"))
         for engine in self.engines:
-            if engine.name in self._benched:
+            if engine.name in self._benched or engine.name in self._disabled:
                 continue
             if engine.max_source_bytes and source_bytes > engine.max_source_bytes:
-                # 上限是引擎固有属性（如 MyMemory 500 字节），不是故障：
+                # 上限是引擎固有属性（部分免费接口对单次请求有字节/字符限制），
+                # 不是故障：
                 # 不发请求、不计失败、不触发熔断，只在这条记录的尝试列表里说明。
                 errors.append("%s: 原文 %d 字节超过该引擎 %d 字节单次上限，已跳过"
                               % (engine.name, source_bytes, engine.max_source_bytes))
@@ -1196,7 +1369,10 @@ class Router:
             try:
                 translated, detected = engine.translate_detailed(text, source, target)
             except EngineError as exc:
-                self._note_failure(engine.name)
+                # 额度 / 凭证类：本轮直接停用该引擎（重试没意义），
+                # 也**不**计熔断次数 —— 它的失败不是"抖动"，是定性结论。
+                if not self.classify_and_mark(engine.name, str(exc), exc):
+                    self._note_failure(engine.name)
                 errors.append("%s: %s" % (engine.name, exc))
                 continue
             except Exception as exc:  # 兜底，绝不让单引擎异常打断整条链
@@ -1230,6 +1406,10 @@ class Router:
                 result.text = text
             return result
 
+        # 全链被停用（额度 / 凭证）时给出对应的"该停了"信号
+        stop = self.stop_exception()
+        if stop is not None:
+            raise stop
         raise EngineError(self.failure_message(errors))
 
     # -- 失败时的完整交代 -------------------------------------------------- #
@@ -1263,6 +1443,8 @@ class Router:
         for name in self._benched:
             parts.append("%s: 本轮已连续失败 %d 次，暂时跳过"
                          % (name, self._fail_streak.get(name, 0)))
+        for name, kind in self._disabled.items():
+            parts.append("%s: 已停用（%s），本轮不再调用" % (name, kind))
         for name, keys in self.missing:
             parts.append("%s: 未配置（需要 %s）" % (name, " / ".join(keys)))
         if not parts:
@@ -1281,7 +1463,10 @@ class Router:
                                "%s（检出 %s）" % (translated, detected or "?"), elapsed))
             except Exception as exc:
                 elapsed = int((time.time() - started) * 1000)
-                report.append((ENGINE_LABELS.get(engine.name, engine.name), False, str(exc), elapsed))
+                detail = str(exc)
+                if self.classify_and_mark(engine.name, detail, exc):
+                    detail = "本轮将停用该引擎 —— " + detail
+                report.append((ENGINE_LABELS.get(engine.name, engine.name), False, detail, elapsed))
 
         for name, keys in self.missing:
             report.append((ENGINE_LABELS.get(name, name), False,
