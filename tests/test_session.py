@@ -25,7 +25,7 @@ Cookie**（滑动续期）。官方 JS 插件用的 pkg/plugin/util.NewClient �
   1. 复现：不跟随 Set-Cookie 时，超龄必然 401
   2. 修复：跟随续期后，能跨过过期点跑完整轮批量翻译
   3. API Key 通道：没有会话 Cookie 也能认证；带错 Key 会被直接拒（Stash 的行为）
-  4. 凭据来源：设置页 > 环境变量 STASH_API_KEY
+  4. 凭据来源：设置页 > config.yml（server_connection.Dir 自动定位）> 环境变量
   5. 401 的报错文本要能自证：已运行多久 + 该怎么修
   6. 认证失效时立刻停任务，不再逐条刷「写回失败」
   7. 所有引擎连续失败时停任务（fail_fast_after，0 = 关闭）
@@ -39,7 +39,9 @@ import io
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -372,9 +374,50 @@ def main():
     check("错 Key 的报错指向 API Key 本身",
           wrong_key is not None and "API Key" in wrong_key, str(wrong_key))
 
-    print("\n5) 凭据来源：设置页 > 环境变量")
+    print("\n5) 凭据来源：设置页 > config.yml > 环境变量（config.yml 全自动，零维护）")
+    tmp_root = tempfile.mkdtemp(prefix="wb-stash-cfg-")
+    cfg_dir = os.path.join(tmp_root, "stash-home")
+    os.makedirs(cfg_dir)
+    with open(os.path.join(cfg_dir, "config.yml"), "w", encoding="utf-8") as fh:
+        fh.write('stash:\n  path: /media/stash\napi_key: "yaml-key"\n')
+    empty_dir = os.path.join(tmp_root, "empty-home")
+    os.makedirs(empty_dir)
+    with open(os.path.join(empty_dir, "config.yml"), "w", encoding="utf-8") as fh:
+        fh.write('api_key: ""\n')
+    tricky_dir = os.path.join(tmp_root, "tricky-home")
+    os.makedirs(tricky_dir)
+    with open(os.path.join(tricky_dir, "config.yml"), "w", encoding="utf-8") as fh:
+        fh.write(
+            "stash_boxes:\n"
+            "  - endpoint: http://box/graphql\n"
+            "    api_key: box-nested-key   # 嵌套键不许顶替顶层键\n"
+            "# api_key: commented-out\n"
+            "api_key: top-level-key\n"
+        )
+
     os.environ["STASH_API_KEY"] = "from-env"
     try:
+        key, src = stash_api.resolve_api_key("", cfg_dir)
+        check("config.yml 自动读取（零维护）", key == "yaml-key", "%s %s" % (key, src))
+        check("来源说明指向 config.yml", "config.yml" in src, src)
+
+        key, src = stash_api.resolve_api_key("page-key", cfg_dir)
+        check("设置页的值优先于 config.yml", key == "page-key" and "设置页" in src, src)
+
+        key, src = stash_api.resolve_api_key("", empty_dir)
+        check("config.yml 值为空时回退环境变量",
+              key == "from-env" and "STASH_API_KEY" in src, "%s %s" % (key, src))
+
+        key, src = stash_api.resolve_api_key("", os.path.join(tmp_root, "no-such-dir"))
+        check("读不到 config.yml 时回退环境变量", key == "from-env", "%s %s" % (key, src))
+
+        key, src = stash_api.resolve_api_key("", tricky_dir)
+        check("只认顶层 api_key（嵌套/注释键不顶替）", key == "top-level-key",
+              "%s %s" % (key, src))
+
+        key, src = stash_api.resolve_api_key("", "")
+        check("config_dir 为空时回退环境变量", key == "from-env", "%s %s" % (key, src))
+
         api_env = StashAPI(conn_for(port4, cookie=""))
         check("环境变量兜底生效", api_env.api_key == "from-env", api_env.api_key)
         api_env.use_api_key("")
@@ -383,6 +426,7 @@ def main():
         check("设置页的值优先", api_env.api_key == "from-page", api_env.api_key)
     finally:
         os.environ.pop("STASH_API_KEY", None)
+        shutil.rmtree(tmp_root, ignore_errors=True)
 
     settings = config_mod.load_settings(pipe.FakeApi({"stash_api_key": "page-key"}), {})
     check("设置页的「Stash - API KEY」会被读到",

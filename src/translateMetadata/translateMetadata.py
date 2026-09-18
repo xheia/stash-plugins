@@ -23,9 +23,9 @@ import log
 from config import (load_settings, cache_path, describe_engine_chain,
                     fail_fast_threshold, initialize_default_settings)
 from engines import EngineError, Router, normalize_proxy
-from stash_api import StashAPI, StashAuthError, StashError
+from stash_api import StashAPI, StashAuthError, StashError, resolve_api_key
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 
 # hook 类型前缀 -> 实体名
 _HOOK_ENTITY = {
@@ -525,9 +525,14 @@ def main():
         from config import Settings
         settings = Settings()
 
-    # Stash 只给插件一个会话 Cookie，而它有过期时间（默认 1 小时）。设置页填了
-    # API Key 就补上 —— 它是长期有效的 JWT，长任务不会被会话过期打断。
-    api.use_api_key(settings["stash_api_key"])
+    # Stash 只给插件一个会话 Cookie，而它有过期时间（默认 1 小时）。API Key 是
+    # 长期有效的 JWT，长任务不会被会话过期打断。取值全自动（设置页 > config.yml
+    # > 环境变量）—— server_connection.Dir 直接指向 config.yml 所在目录，
+    # 正常情况下用户什么都不用填。
+    api_key, key_source = resolve_api_key(settings["stash_api_key"], api.config_dir)
+    api.use_api_key(api_key)
+    if key_source:
+        log.info("Stash API Key 来源：%s" % key_source)
     log.info("Stash 连接：%s（认证：%s）" % (api.endpoint, api.auth_label()))
 
     # 默认值初始化：设置项清单声明不了默认值，没填过的键在设置页显示为空

@@ -27,11 +27,11 @@ Cookie**（滑动续期）。官方 JS 插件用的 pkg/plugin/util.NewClient �
 所以这里做了两件事：
   1. 跟随服务端续期：每个响应都吸收 Set-Cookie，后续请求用最新的 Cookie
      （等价于 JS 客户端的 cookiejar）。长任务因此可以一直跑下去。
-  2. 提供 API Key 通道：`stash_api_key` 设置（或环境变量 STASH_API_KEY）填了
-     就以 `ApiKey` 请求头发送。API Key 是长期有效的 JWT，不受会话过期影响，
-     也能扛住 Stash 中途重启（重启会让会话签名密钥轮换，旧 Cookie 立刻作废）。
-     注意 Stash 的判定是「带了 ApiKey 头就必须匹配」（不匹配直接 401，
-     不会退回 Cookie），所以这个值必须与 设置 -> 安全 -> API Key 完全一致。
+  2. 提供 API Key 通道：取值全自动 —— 设置页 stash_api_key > config.yml 的顶层
+     `api_key:`（用 server_connection.Dir 定位，零配置）> 环境变量 STASH_API_KEY。
+     API Key 是长期有效的 JWT，不受会话过期影响，也能扛住 Stash 中途重启
+     （重启会让会话签名密钥轮换，旧 Cookie 立刻作废）。注意 Stash 的判定是
+     「带了 ApiKey 头就必须匹配」（不匹配直接 401，不会退回 Cookie）。
 """
 from __future__ import annotations
 
@@ -42,12 +42,77 @@ import time
 import urllib.error
 import urllib.request
 
-# 环境变量兜底：插件配置本身就存在 Stash 里，万一启动时拿到的会话已经失效，
-# 设置页就读不出来了，这时只能靠容器环境变量喂一个 API Key 进来。
+# 环境变量兜底：容器部署等拿不到 config.yml 的场景，喂一个 API Key 进来。
 API_KEY_ENV = "STASH_API_KEY"
+
+# Stash 自己进程内定位 config.yml 用的变量（pkg 不会传给插件进程，仅作兜底候选）
+CONFIG_FILE_ENV = "STASH_CONFIG_FILE"
 
 # 最便宜的一次探活：不碰任何业务数据，只走认证中间件 + 版本解析。
 AUTH_PROBE_QUERY = "query AuthProbe { version { version } }"
+
+
+def _api_key_candidates(config_dir=None):
+    """config.yml 的候选路径，按可靠性排序。
+
+    server_connection.Dir 是官方注入的「Stash 配置文件所在目录」
+    （pkg/plugin/common/msg.go: "Dir specifies the directory containing the
+    stash server's configuration file"），用它拼 config.yml 零猜测、零配置。
+    """
+    paths = []
+    for d in (config_dir or "").strip(), (os.environ.get(CONFIG_FILE_ENV) or "").strip():
+        if d:
+            paths.append(os.path.join(d, "config.yml"))
+            break
+    paths.append(os.path.join(os.path.expanduser("~"), ".stash", "config.yml"))
+    return paths
+
+
+def api_key_from_config_file(config_dir=None):
+    """从 Stash 的 config.yml 读顶层 api_key，返回 (key, path)。
+
+    Stash 的 config.yml 是 koanf 平铺结构，自己的 API Key 就是顶层 `api_key:`
+    （internal/manager/config/config.go: ApiKey = "api_key"，getString 顶层取值）。
+    注意与 stash_box 端点配置里嵌套的 api_key 无关 —— 这里只认行首无缩进的顶层键，
+    值去引号；读到键（哪怕值为空）就停，不会拿下一个候选路径的值来顶替。
+    """
+    for path in _api_key_candidates(config_dir):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        continue
+                    # 顶层键：第一个非空字符不是缩进
+                    if line[:1] in (" ", "\t"):
+                        continue
+                    if stripped == "api_key:" or stripped.startswith("api_key:"):
+                        value = stripped[len("api_key:"):].strip()
+                        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                            value = value[1:-1].strip()
+                        return (value, path)
+        except OSError:
+            continue
+    return "", None
+
+
+def resolve_api_key(settings_key, config_dir=None):
+    """API Key 的取值链：设置页 > config.yml > 环境变量。返回 (key, 来源说明)。
+
+    config.yml 由 server_connection.Dir 自动定位，正常情况下用户什么都不用填。
+    """
+    key = (settings_key or "").strip()
+    if key:
+        return key, "设置页"
+
+    key, path = api_key_from_config_file(config_dir)
+    if key:
+        return key, "config.yml（%s）" % path
+
+    key = (os.environ.get(API_KEY_ENV) or "").strip()
+    if key:
+        return key, "环境变量 %s" % API_KEY_ENV
+    return "", ""
 
 
 class StashError(Exception):
@@ -94,6 +159,9 @@ class StashAPI:
         self.cookie = "%s=%s" % (cookie_name, cookie_value) if cookie_value else ""
         self.timeout = int(sc.get("TimeoutSeconds") or 60)
 
+        # Stash 配置文件所在目录（官方注入），config.yml 自动读 api_key 就靠它
+        self.config_dir = (sc.get("Dir") or "").strip()
+
         # 设置页填的值优先，其次环境变量（插件配置读不到时的兜底）
         self.api_key = (api_key or os.environ.get(API_KEY_ENV) or "").strip()
 
@@ -105,7 +173,7 @@ class StashAPI:
 
     # -- 凭据 -------------------------------------------------------------- #
     def use_api_key(self, api_key):
-        """设置页读到 API Key 后启用（留空保持现状，不覆盖环境变量）。"""
+        """注入 API Key（留空保持现状，不覆盖已有的环境变量兜底值）。"""
         api_key = (api_key or "").strip()
         if api_key:
             self.api_key = api_key
