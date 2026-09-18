@@ -215,6 +215,10 @@ class BaseEngine:
 
     name = "base"
 
+    # 单次请求原文的字节上限（None = 不限）。超限的文本在 Router 里预检跳过，
+    # 不发请求、不算失败、不进熔断 —— 上限是引擎的固有属性，不是故障。
+    max_source_bytes = None
+
     # 各引擎自己的默认值 —— v1.2.7 起设置页不再暴露「请求超时 / 重试次数 / 重试等待」，
     # 由这里兜底；子类按自身特点覆盖（LLM 慢，给 120s）。
     # 任务参数里显式传 timeout_s / retry_times 仍然优先。
@@ -515,13 +519,24 @@ class TencentEngine(BaseEngine):
         self.secret_id = (options.get("tencent_secret_id") or "").strip()
         self.secret_key = (options.get("tencent_secret_key") or "").strip()
         custom = (options.get("tencent_url") or "").strip()
+        region_opt = ((options.get("tencent_region") or "").strip()
+                      or TENCENT_DEFAULT_REGION)
         if custom:
             self.host, derived_region = normalize_tencent_endpoint(custom)
-            self.region = (derived_region if TENCENT_REGION_HOST_RE.match(self.host)
-                           else (options.get("tencent_region") or TENCENT_DEFAULT_REGION).strip()
-                           or TENCENT_DEFAULT_REGION)
+            if TENCENT_REGION_HOST_RE.match(self.host):
+                # 官方地域域名（tmt.<地域>.tencentcloudapi.com）：地域以域名为准
+                self.region = derived_region
+            else:
+                # 内网网关等非腾讯域名：host 照用，地域按 tencent_region
+                self.region = region_opt
         else:
             self.host, self.region = normalize_tencent_endpoint(options.get("tencent_region"))
+        # 收口：host 是官方主域名（不带地域段）时一律换算成地域域名。
+        # v1.2.9 修复：v1.2.8 的默认值初始化把 tencent_url 种成了主域名，直接拿它
+        # 当 host 请求时腾讯网关报 X-TC-Region invalid —— tencent_region 填了完整
+        # 接口地址（旧插件残留）的场景同理，都在这里统一拉回地域域名。
+        if self.host == TENCENT_DEFAULT_HOST:
+            self.host, self.region = normalize_tencent_endpoint(self.region)
 
     def available(self):
         return bool(self.secret_id and self.secret_key)
@@ -605,7 +620,8 @@ class TencentEngine(BaseEngine):
         resp = data.get("Response") or {}
         if resp.get("Error"):
             err = resp["Error"]
-            raise EngineError("腾讯云报错 %s: %s" % (err.get("Code"), err.get("Message")))
+            raise EngineError("腾讯云报错 %s: %s（host=%s, region=%s）"
+                              % (err.get("Code"), err.get("Message"), self.host, self.region))
 
         translated = resp.get("TargetText")
         if not translated:
@@ -905,6 +921,7 @@ class DeepLEngine(BaseEngine):
 class MyMemoryEngine(BaseEngine):
     name = "mymemory"
     API_URL = "https://api.mymemory.translated.net/get"
+    max_source_bytes = 500
 
     def __init__(self, options=None):
         super().__init__(options)
@@ -1166,8 +1183,15 @@ class Router:
             raise EngineError("没有可用的翻译引擎" + detail)
 
         errors = []
+        source_bytes = len(text.encode("utf-8"))
         for engine in self.engines:
             if engine.name in self._benched:
+                continue
+            if engine.max_source_bytes and source_bytes > engine.max_source_bytes:
+                # 上限是引擎固有属性（如 MyMemory 500 字节），不是故障：
+                # 不发请求、不计失败、不触发熔断，只在这条记录的尝试列表里说明。
+                errors.append("%s: 原文 %d 字节超过该引擎 %d 字节单次上限，已跳过"
+                              % (engine.name, source_bytes, engine.max_source_bytes))
                 continue
             try:
                 translated, detected = engine.translate_detailed(text, source, target)

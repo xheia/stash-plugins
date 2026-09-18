@@ -320,16 +320,18 @@ def tencent_endpoint(value):
 check("裸地域 -> 补全接入点",
       tencent_endpoint("ap-guangzhou") == ("tmt.ap-guangzhou.tencentcloudapi.com", "ap-guangzhou"))
 # ★ 实测撞到过：用户填接口地址，被原样塞进 X-TC-Region，服务端报 InvalidParameterValue
-check("完整接口地址 -> 地域回落默认",
-      tencent_endpoint("https://tmt.tencentcloudapi.com") == ("tmt.tencentcloudapi.com", "ap-guangzhou"))
+# ★ v1.2.9 收口：主域名（不带地域段）一律换算成地域域名再请求 —— 腾讯网关对
+#   「主域名 + X-TC-Region」组合也报 region invalid（v1.2.8 种子触发过）
+check("完整接口地址 -> 换算成地域域名",
+      tencent_endpoint("https://tmt.tencentcloudapi.com") == ("tmt.ap-guangzhou.tencentcloudapi.com", "ap-guangzhou"))
 check("带地域的完整地址 -> 提取地域",
       tencent_endpoint("https://tmt.ap-shanghai.tencentcloudapi.com")
       == ("tmt.ap-shanghai.tencentcloudapi.com", "ap-shanghai"))
 check("裸域名 -> 提取地域",
       tencent_endpoint("tmt.ap-beijing.tencentcloudapi.com")
       == ("tmt.ap-beijing.tencentcloudapi.com", "ap-beijing"))
-check("留空 -> 默认",
-      tencent_endpoint("") == ("tmt.tencentcloudapi.com", "ap-guangzhou"))
+check("留空 -> 默认（地域域名，v1.2.9 收口后与旧版行为一致）",
+      tencent_endpoint("") == ("tmt.ap-guangzhou.tencentcloudapi.com", "ap-guangzhou"))
 check("自定义内网接入点保留 host",
       tencent_endpoint("https://tmt.internal.corp")[0] == "tmt.internal.corp")
 
@@ -779,6 +781,16 @@ tc_mirror = engines.TencentEngine({"tencent_url": "https://tmt.internal.corp",
 check("腾讯云：内网网关这类域名按 tencent_region 定地域",
       (tc_mirror.host, tc_mirror.region) == ("tmt.internal.corp", "ap-beijing"),
       "%s / %s" % (tc_mirror.host, tc_mirror.region))
+# v1.2.9 回归：默认值初始化把 tencent_url 种成了官方主域名，直接请求会报
+# X-TC-Region invalid —— 必须换算成地域域名
+tc_seeded = engines.TencentEngine({"tencent_url": "https://tmt.tencentcloudapi.com"})
+check("腾讯云：官方主域名（种子值）换算成地域域名",
+      (tc_seeded.host, tc_seeded.region) == ("tmt.ap-guangzhou.tencentcloudapi.com", "ap-guangzhou"),
+      "%s / %s" % (tc_seeded.host, tc_seeded.region))
+tc_legacy = engines.TencentEngine({"tencent_region": "https://tmt.tencentcloudapi.com"})
+check("腾讯云：region 填完整接口地址（旧插件残留）同样收口",
+      (tc_legacy.host, tc_legacy.region) == ("tmt.ap-guangzhou.tencentcloudapi.com", "ap-guangzhou"),
+      "%s / %s" % (tc_legacy.host, tc_legacy.region))
 
 check("阿里云用自定义地址（完整域名）",
       engines.AlibabaEngine({"alibaba_url": "https://mt.cn-hangzhou.aliyuncs.com"}).host

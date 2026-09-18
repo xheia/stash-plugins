@@ -483,19 +483,27 @@ def _init_defaults():
         "tencent_url": "https://" + engines.TENCENT_DEFAULT_HOST,
         "alibaba_url": "https://" + engines.AlibabaEngine.DEFAULT_HOST,
         "mymemory_url": engines.MyMemoryEngine.API_URL,
-        "libretranslate_url": DEFAULTS["libretranslate_url"],
+        # 注意：libretranslate_url 故意不种 —— 它没有公共实例，"默认" localhost:5000
+        # 种进配置会顶掉用户从旧插件键迁移来的真实地址（v1.2.8 就这么坑过一回）。
         # AI
         "openai_model": DEFAULTS["openai_model"],
     }
 
 
 def missing_init_seeds(raw):
-    """算出需要补种的键：INIT 默认值里有、而 raw 里空缺的。"""
+    """算出需要补种的键：INIT 默认值里有、而 raw 里空缺的。
+
+    「空缺」还包括"本键没填但旧插件别名键填了"的情况 —— load_settings 的别名
+    兼容还在给它供值，这时候种默认值会把真实值顶掉（v1.2.8 的教训）。
+    """
     raw = raw or {}
     seeds = {}
     for key, value in _init_defaults().items():
         if raw.get(key) in (None, ""):
-            seeds[key] = value
+            aliased = any(raw.get(a) not in (None, "")
+                          for a in KEY_ALIASES.get(key, ()))
+            if not aliased:
+                seeds[key] = value
     if "engine_fallback" in seeds and raw.get("engine") not in (None, ""):
         # 旧版「主翻译引擎」还在生效中，不动引擎链，兼容逻辑继续走
         del seeds["engine_fallback"]
@@ -516,11 +524,23 @@ def initialize_default_settings(api, log=None):
         return {}
 
     seeds = missing_init_seeds(raw)
-    if not seeds:
-        return {}
 
     merged = dict(raw)
     merged.update(seeds)
+
+    # 一次性迁移（v1.2.8 事故善后）：libretranslate_url 被种成 localhost:5000、
+    # 而旧插件键里存着真实地址的用户，把真值找回来。
+    if (merged.get("libretranslate_url") or "").strip().rstrip("/").lower() \
+            in ("http://localhost:5000", "localhost:5000"):
+        for alias in KEY_ALIASES.get("libretranslate_url", ()):
+            legacy = (raw or {}).get(alias)
+            if legacy not in (None, ""):
+                merged["libretranslate_url"] = legacy
+                seeds["libretranslate_url"] = "%s（从旧版键 %s 迁回）" % (legacy, alias)
+                break
+
+    if not seeds:
+        return {}
     api.call(CONFIGURE_PLUGIN_MUTATION,
              {"plugin_id": PLUGIN_ID, "input": merged})
     if log:

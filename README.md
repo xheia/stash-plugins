@@ -401,7 +401,7 @@ Stash 找不到 Python。设置 → 系统 → 应用程序路径 → Python 可
 | --------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------------------ |
 | 腾讯云 `AuthFailure.SecretIdNotFound`                  | SecretId 不存在                    | 核对 `tencent_secret_id`，注意别把 SecretKey 填串了                                            |
 | 腾讯云 `AuthFailure.SignatureFailure`                  | 签名不对                            | 检查系统时间是否偏差过大（签名带时间戳）                                                                 |
-| 腾讯云 `InvalidParameterValue: X-TC-Region is invalid` | `tencent_region` 填的是接口地址        | 1.1.2 起已自动兼容；升级即可，或改填 `ap-guangzhou`                                                 |
+| 腾讯云 `InvalidParameterValue: X-TC-Region is invalid` | 请求 host 是官方主域名（不带地域段）             | v1.2.9 起统一收口为主域名自动换算成地域域名（v1.2.8 的默认值初始化曾种出这个 bug）；报错里已带实际 host/region 可直接核对 |
 | 阿里云 `InvalidAccessKeyId.NotFound`                   | AccessKeyId 不存在                 | 核对 `alibaba_access_key`                                                              |
 | 阿里云 `InvalidAccessKeyId.Inactive`                   | **AccessKey 已被禁用**              | 到 RAM 控制台把该 AK 重新启用，或换一个                                                             |
 | 阿里云 `SignatureDoesNotMatch`                         | 签名不对                            | 核对 `alibaba_access_secret`；这个报错说明 AK 本身是有效的                                          |
@@ -414,6 +414,7 @@ Stash 找不到 Python。设置 → 系统 → 应用程序路径 → Python 可
 | DeepL `HTTP 403`                                    | Key 无效或档位填错                     | 免费 Key（`:fx` 结尾）必须走 `api-free.deepl.com`；地址留空即自动选择                                   |
 | DeepL `HTTP 456`                                    | 本月免费额度耗尽                        | 下月恢复，或改用其它引擎                                                                         |
 | MyMemory `MYMEMORY WARNING`                         | 当日免费额度用尽                        | 填 `mymemory_email` 提额到约 5 万词/天，或换引擎                                                  |
+| MyMemory「原文超过 500 字节」                          | 引擎固有单次上限（不是故障）                  | v1.2.9 起超限文本自动跳过该引擎：不发请求、不计失败、不触发熔断，直接试链中下一个引擎                    |
 | AI 翻译 `Incorrect API key` / 401                     | Key 不对或服务不匹配                    | 核对 `openai_api_key`；注意模型名要与所用服务匹配（DeepSeek 没有 `gpt-*`）                               |
 | AI 翻译 `ModuleNotFoundError` / 404                   | 接口地址不对                          | 确认 `openai_base_url` 是否为该服务的 OpenAI 兼容端点；Ollama 需 `Ollama serve` 且已 `ollama pull` 模型 |
 | **识别（Identify）后没有自动翻译**                         | 钩子只在识别**实际改动了字段**时触发            | Stash 源码：识别结果与现有数据完全一致时（updater 为空）不触发 `Scene.Update.Post` 钩子。确认该场景的标题/简介确实被识别改写过；v1.2.3 起钩子触发与跳过原因都会打 Info 日志，跑一次识别看日志即可定位 |
@@ -423,7 +424,9 @@ Stash 找不到 Python。设置 → 系统 → 应用程序路径 → Python 可
 >
 > 同理，阿里云在请求缺少必填参数（如 `FormatType`）时可能回一个与参数无关的  
 > `InvalidAccountStatus`，让人误以为是账号没开通。**遇到含义可疑的报错时，  
-> 先确认请求参数齐全** —— 这是踩过一次坑的结论。
+> 先确认请求参数齐全** —— 这是踩过一次坑的结论。真正的「账号没开通」去
+> <https://mt.console.aliyun.com/> 开通机器翻译服务（免费，通用版每月 100 万字符免费额度），
+> 没打算用的话把 `alibaba` 从引擎链里去掉即可，别让它每次都白报一次错。
 
 **批量任务跑到一半提示失败**  
 多半是免费额度用尽或被限流。把 `rate_limit_ms` 调大（比如 1000），用「翻译 - 试跑 20 条」这类任务分几次跑（`max_items` 只统计真正翻译的记录，已翻译的跳过不占名额，任务会自动向后扫描）。

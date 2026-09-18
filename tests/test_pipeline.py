@@ -727,6 +727,55 @@ def main():
     check("冒烟：空配置 load_settings 仍回默认链", after.engine_chain == list(config_mod.DEFAULT_ENGINE_CHAIN),
           str(after.engine_chain))
 
+    # ------------------------------------------------------------------ #
+    print("\n15) 初始化种子不顶掉旧键真值 + libretranslate 迁回（v1.2.9）")
+    # v1.2.8 事故：libretranslate_url 被种成 localhost:5000，把用户旧插件键里的
+    # 真实自托管地址顶掉了（兼容读取只在本插件键为空时生效）。
+
+    seeds_alias = config_mod.missing_init_seeds(
+        {"translateLibretranslateUrl": "http://192.168.3.96:5353"})
+    check("旧键里有真值时，本键不种默认值",
+          "libretranslate_url" not in seeds_alias, str(sorted(seeds_alias)))
+
+    api6 = FakeConfigApi({"libretranslate_url": "http://localhost:5000",
+                          "translateLibretranslateUrl": "http://192.168.3.96:5353"})
+    seeded6 = config_mod.initialize_default_settings(api6)
+    written6 = api6.mutations[0]["input"] if api6.mutations else {}
+    check("已被种成 localhost:5000 的地址从旧键迁回",
+          written6.get("libretranslate_url") == "http://192.168.3.96:5353",
+          str(written6.get("libretranslate_url")))
+
+    seeds_lt = config_mod.missing_init_seeds({})
+    check("种子清单里不再有 libretranslate_url（无公共实例，种了必错）",
+          "libretranslate_url" not in seeds_lt, str(sorted(seeds_lt)))
+
+    # ------------------------------------------------------------------ #
+    print("\n16) MyMemory 500 字节预检：超限跳过，不发请求不计失败（v1.2.9）")
+    _real_http = engines_mod.http_request
+
+    def _must_not_request(*args, **kwargs):
+        raise AssertionError("超限文本不应发出请求")
+
+    engines_mod.http_request = _must_not_request
+    router = engines_mod.Router(["mymemory"], {})
+    check("MyMemory 引擎可用（匿名）", router.has_engine())
+    try:
+        router.translate("x" * 600)
+        check("超限文本全部引擎跳过应抛错", False)
+    except EngineError as exc:
+        check("超限文本报错信息含「已跳过」", "已跳过" in str(exc), str(exc))
+    check("超限不计失败（不触发熔断）", not router._benched and not router._fail_streak,
+          str(router._fail_streak))
+    check("超限未发出任何请求", True)  # http_request 被替换成必炸桩，走到这说明没发
+    engines_mod.http_request = _real_http
+
+    # 正常长度仍能正常请求（stub 返回译文）
+    engines_mod.http_request = lambda *a, **k: (200, b'{"responseData":{"translatedText":"hi"},"responseStatus":200}')
+    router2 = engines_mod.Router(["mymemory"], {})
+    out = router2.translate("hello")
+    check("正常长度照常请求", out.engine == "mymemory" and out.text, str(out))
+    engines_mod.http_request = _real_http
+
     server.shutdown()
     if os.path.exists(cache_file):
         os.remove(cache_file)
