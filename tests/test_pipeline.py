@@ -537,6 +537,37 @@ def main():
     check("读设置失败时退回默认值", safe.engine_chain == ["google"], str(safe.engine_chain))
     check("读设置失败时标注来源不可读", safe.source == "unreadable", safe.source)
 
+    print("\n13) max_items 名额：跳过的已翻译记录不占名额（v1.2.4 回归）")
+    # 背景：列表按 id ASC 分页，旧版把「看过的记录」全计入 max_items，
+    # 于是每次任务都在重复扫描最前面那批已翻译记录，永远到不了后面。
+    state.db["scene"] = []
+    state.seed("scene", [
+        {"title": "已经翻译过的场景一", "details": "这是中文简介一"},
+        {"title": "已经翻译过的场景二", "details": "这是中文简介二"},
+        {"title": "已经翻译过的场景三", "details": "这是中文简介三"},
+        {"title": "English Scene Four", "details": "Needs translation four."},
+        {"title": "English Scene Five", "details": "Needs translation five."},
+    ])
+    state.settings["max_items"] = "2"
+    state.settings["batch_size"] = "2"
+    calls_before = engine.calls
+    mutations_before = state.mutations
+    code, result, _ = run_plugin(state, port, {"mode": "scene"})
+    output = result.get("output") or ""
+    check("跳过 3 个已翻译后仍翻到了 2 个未翻译的", "翻译 2 个" in output, output)
+    check("全程扫描了全部 5 条", "扫描 5 个" in output, output)
+    check("只有未翻译的记录调了引擎（2 条 × 标题+简介）", engine.calls == calls_before + 4,
+          "calls %d -> %d" % (calls_before, engine.calls))
+    check("前 3 条中文记录未被改写", state.mutations == mutations_before + 2,
+          "mutations %d -> %d" % (mutations_before, state.mutations))
+    check("场景#4 已被翻译", state.db["scene"][3]["title"] == "译文：English Scene Four"
+          or "译文" in state.db["scene"][3]["title"],
+          state.db["scene"][3]["title"])
+    check("场景#5 已被翻译", "译文" in state.db["scene"][4]["title"],
+          state.db["scene"][4]["title"])
+    state.settings["max_items"] = "0"
+    state.settings["batch_size"] = "100"
+
     server.shutdown()
     if os.path.exists(cache_file):
         os.remove(cache_file)

@@ -23,7 +23,7 @@ from config import load_settings, cache_path
 from engines import EngineError, Router, normalize_proxy
 from stash_api import StashAPI, StashError
 
-VERSION = "1.2.3"
+VERSION = "1.2.4"
 
 # hook 类型前缀 -> 实体名
 _HOOK_ENTITY = {
@@ -223,7 +223,8 @@ def run_batch(api, settings, router, cache, entities, dry_run):
     for entity in entities:
         log.info("===== 开始处理：%s =====" % fields.label(entity))
         page = 1
-        processed = 0
+        examined = 0
+        translated = 0
         written_total = 0
         total = 0
 
@@ -236,9 +237,9 @@ def run_batch(api, settings, router, cache, entities, dry_run):
                 break
 
             for record in records:
-                if max_items and processed >= max_items:
+                if max_items and translated >= max_items:
                     break
-                processed += 1
+                examined += 1
 
                 items = translator.translate_record(entity, record)
                 if items:
@@ -247,18 +248,25 @@ def run_batch(api, settings, router, cache, entities, dry_run):
                             api, entity, record, items, settings, dry_run))
                     except StashError as exc:
                         log.error("%s#%s 写回失败: %s" % (fields.label(entity), record.get("id"), exc))
-                log.progress_step(processed, min(total, max_items) if max_items else total)
+                    # 名额只统计真正动了翻译的记录；已翻译/无可译字段的记录
+                    # 不占 max_items，否则每次任务都从 id 最小的已完成记录
+                    # 重新扫起，永远轮不到后面未翻译的内容。
+                    translated += 1
+                log.progress_step(examined, total)
 
-            log.info("%s 第 %d 页完成（%d/%d）" % (fields.label(entity), page, processed, total))
+            log.info("%s 第 %d 页完成（已扫描 %d/%d，本次翻译 %d 个）"
+                     % (fields.label(entity), page, examined, total, translated))
 
-            if max_items and processed >= max_items:
-                log.info("已达到 max_items=%d 上限，停止" % max_items)
+            if max_items and translated >= max_items:
+                log.info("已达到 max_items=%d（实际翻译）上限，停止（共扫描 %d 个）"
+                         % (max_items, examined))
                 break
             if page * batch_size >= total:
                 break
             page += 1
 
-        summary.append("%s %d 个（写入字段 %d）" % (fields.label(entity), processed, written_total))
+        summary.append("%s 扫描 %d 个，翻译 %d 个（写入字段 %d）"
+                       % (fields.label(entity), examined, translated, written_total))
 
     stats = translator.stats
     text = "；".join(summary) + "。命中缓存 %d 次，跳过 %d 项，失败 %d 项" % (

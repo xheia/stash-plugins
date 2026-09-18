@@ -15,7 +15,7 @@ description: >-
   百度、腾讯云、阿里云、Lingva、MyMemory、LibreTranslate、EDGE 免认证接口，
   可配置优先级与失败回退；刮削（场景创建 / 更新）时自动触发，也可在任务页手动批量执行；
   翻译完成后详情页自动刷新显示译文。
-version: 1.2.3
+version: 1.2.4
 url: https://github.com/xheia/stash-plugins
 
 exec:
@@ -330,8 +330,8 @@ settings:
     type: NUMBER
 
   max_items:
-    displayName: 单次任务处理上限
-    description: 0 表示不限制
+    displayName: 单次任务实际翻译上限
+    description: 只统计真正翻译的记录数；已是中文 / 已翻译过的记录会被跳过且不占名额，任务会继续向后扫描。0 表示不限制
     type: NUMBER
 
   cache_enabled:
