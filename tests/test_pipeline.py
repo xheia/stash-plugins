@@ -81,7 +81,7 @@ class FakeStash:
     def __init__(self):
         self.db = {"scene": [], "performer": [], "studio": [], "tag": []}
         self.settings = {
-            "engine": "edge",
+            "engine_fallback": "edge",
             "target_lang": "zh-CN",
             "source_lang": "auto",
             "rate_limit_ms": 0,
@@ -513,20 +513,56 @@ def main():
     # 什么设置都没有也要能跑起来（退回内置默认）
     blank = config_mod.load_settings(FakeApi({}), {})
     check("无任何设置时回退内置默认引擎链",
-          blank.engine_chain == ["google"], str(blank.engine_chain))
-    check("默认链不含已下线的 edge", "edge" not in blank.engine_chain, str(blank.engine_chain))
+          blank.engine_chain == list(config_mod.DEFAULT_ENGINE_CHAIN), str(blank.engine_chain))
+    check("默认链非空且不含已下线的 edge（要用得手动加）",
+          bool(blank.engine_chain) and "edge" not in blank.engine_chain,
+          str(blank.engine_chain))
     check("无任何设置时阿里云凭证为空",
           not blank.engine_options()["alibaba_access_key"])
     check("默认开启瞬时错误重试", blank.engine_options()["retry_times"] == 1)
     check("默认开启引擎熔断", blank.engine_options()["engine_skip_after"] == 3)
 
+    # v1.2.6：主翻译引擎设置已取消，只剩一条引擎链
+    chained = config_mod.load_settings(FakeApi({"engine_fallback": "deepl, google ; mymemory，baidu"}), {})
+    check("引擎链按顺序生效",
+          chained.engine_chain == ["deepl", "google", "mymemory", "baidu"], str(chained.engine_chain))
+    check("引擎链去重",
+          config_mod.load_settings(FakeApi({"engine_fallback": "google,google, google"}), {}).engine_chain
+          == ["google"])
+    check("引擎链只有分隔符时回退默认链",
+          config_mod.load_settings(FakeApi({"engine_fallback": " , ;; ，"}), {}).engine_chain
+          == list(config_mod.DEFAULT_ENGINE_CHAIN))
+    check("引擎链里的未知名字保留原样（由 Router 过滤并在自检里列出）",
+          config_mod.load_settings(FakeApi({"engine_fallback": "tengcent,google"}), {}).engine_chain
+          == ["tengcent", "google"])
+
+    # 兼容：老配置里单独的 engine（主引擎）键
+    legacy = config_mod.load_settings(FakeApi({"engine": "deepl"}), {})
+    check("旧版主引擎键在链留空时被当作链首",
+          legacy.engine_chain == ["deepl"], str(legacy.engine_chain))
+    both = config_mod.load_settings(FakeApi({"engine": "edge", "engine_fallback": "mymemory,google"}), {})
+    check("链一旦填了，旧的主引擎键就被忽略",
+          both.engine_chain == ["mymemory", "google"], str(both.engine_chain))
+
+    # 自检任务要能说清"这条链是从哪来的"（默认值在代码里，不看日志根本猜不到）
+    check("引擎链来源说明标出「设置页」",
+          config_mod.describe_engine_chain(chained).startswith("设置页："),
+          config_mod.describe_engine_chain(chained))
+    check("链路留空时来源说明标出内置默认",
+          "内置默认" in config_mod.describe_engine_chain(blank),
+          config_mod.describe_engine_chain(blank))
+    check("沿用旧版主引擎键时来源说明里点出来",
+          "旧版" in config_mod.describe_engine_chain(legacy),
+          config_mod.describe_engine_chain(legacy))
+
     # 设置来源要能被看出来，这是「改完没生效」类问题的第一手线索
     check("无设置时标注来源为设置页内容为空", blank.source == "empty", blank.source)
-    filled = config_mod.load_settings(FakeApi({"engine": "tencent", "tencent_secret_id": "x"}), {})
+    filled = config_mod.load_settings(FakeApi({"tencent_secret_id": "x"}), {})
     check("有设置时标注来源为设置页", filled.source == "settings", filled.source)
     check("来源里带上生效的键名",
-          "engine" in filled.read_keys and "tencent_secret_id" in filled.read_keys,
-          str(filled.read_keys))
+          "tencent_secret_id" in filled.read_keys, str(filled.read_keys))
+    check("旧版主引擎键被读出时也标出来源",
+          any("engine" in k for k in legacy.read_keys), str(legacy.read_keys))
 
     # 读设置失败（接口报错）不应中断任务
     class BoomApi:
@@ -534,7 +570,8 @@ def main():
             raise RuntimeError("configuration 查询失败")
 
     safe = config_mod.load_settings(BoomApi(), {})
-    check("读设置失败时退回默认值", safe.engine_chain == ["google"], str(safe.engine_chain))
+    check("读设置失败时退回默认值",
+          safe.engine_chain == list(config_mod.DEFAULT_ENGINE_CHAIN), str(safe.engine_chain))
     check("读设置失败时标注来源不可读", safe.source == "unreadable", safe.source)
 
     print("\n13) max_items 名额：跳过的已翻译记录不占名额（v1.2.4 回归）")

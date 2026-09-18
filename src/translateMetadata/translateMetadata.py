@@ -20,11 +20,11 @@ import cache as cache_mod
 import detect
 import fields
 import log
-from config import load_settings, cache_path
+from config import load_settings, cache_path, describe_engine_chain
 from engines import EngineError, Router, normalize_proxy
 from stash_api import StashAPI, StashError
 
-VERSION = "1.2.5"
+VERSION = "1.2.6"
 
 # hook 类型前缀 -> 实体名
 _HOOK_ENTITY = {
@@ -346,6 +346,7 @@ def run_selftest(settings, router):
             log.info("http_proxy：未手动设置，使用系统代理 %s" % picked)
         else:
             log.info("http_proxy：未设置，直连（无系统代理）")
+    log.info("引擎链来源：%s" % describe_engine_chain(settings))
     log.info("引擎优先级：%s" % " -> ".join(router.chain_names() or ["(无)"]))
     log.info("参数：超时 %ss，请求间隔 %sms，瞬时错误重试 %d 次，熔断阈值 %s"
              % (settings["timeout_s"], settings["rate_limit_ms"], settings["retry_times"],

@@ -191,11 +191,17 @@ python3 build.py --check    # 只预览会打包哪些文件
 
 ### 推荐配置
 
-**有 AI API（质量首选）** → 主引擎 `openai`，回退云厂商
+> **v1.2.6 起只有「翻译引擎链」一个设置**：原先的「主翻译引擎」已取消 —— 两处配置各说各话，
+> 改了一个忘了另一个，表现就是"我明明改了怎么没生效"。老配置里的 `engine` 键仍会被读一次，
+> 只在引擎链留空时当作链首，升级后行为不会突变。
+>
+> **引擎链留空 = 用内置默认值**：`tencent,alibaba,baidu,deepl,openai,mymemory,google`。
+> 没配凭证的引擎会被自动跳过（在「测试翻译引擎」日志里列为"缺少凭证"），所以默认链对谁都安全。
+
+**有 AI API（质量首选）**：把 `openai` 放链首
 
 ```
-engine:          openai
-engine_fallback: tencent,mymemory
+engine_fallback: openai,tencent,mymemory
 openai_base_url: https://api.deepseek.com        # 或 Ollama http://localhost:11434
 openai_api_key:  sk-xxx                          # Ollama / LM Studio 留空
 openai_model:    deepseek-chat                   # 或 glm-4-flash / qwen2.5:7b 等
@@ -204,37 +210,34 @@ timeout_s:       120                             # LLM 比机翻慢，超时给�
 
 LLM 翻译对这类内容优势明显：能理解上下文、保留 `#456` 这类编号、人名处理更自然。
 
-**国内直连（无 AI）** → 主引擎 `tencent`，回退 `alibaba,mymemory`
+**国内直连（无 AI）**：把云厂商排前面
 
 ```
-engine:          tencent
-engine_fallback: alibaba,mymemory
+engine_fallback: tencent,alibaba,mymemory
 ```
 
-**有代理** → 主引擎 `google`，回退 `tencent,alibaba`
+**有代理**：
 
 ```
-engine:          google
-engine_fallback: tencent,alibaba
+engine_fallback: google,tencent,alibaba
 ```
 > 代理走系统配置：给容器加环境变量 `HTTPS_PROXY=http://192.168.3.2:7890` 即可，无需在插件里填。
 
-**完全零成本** → 主引擎 `mymemory`，回退 `google`（需代理）
+**完全零成本**：
 
 ```
-engine:          mymemory
-engine_fallback: google
+engine_fallback: mymemory,google
 ```
 
 > ⚠️ **Lingva 公共实例基本全死（2026-09 实测）**：`lingva.ml` 被 Cloudflare
 > 人机验证拦截（403 Just a moment），`lunar.icu` / `esmailelbob.xyz` 已下线，
 > `plausibility.cloud` 返回 500。只有自托管 Lingva 才建议启用该引擎；
-> 放在回退链里也无妨——连续失败 3 次会被熔断跳过，不会拖慢任务。
+> 放进引擎链里也无妨——连续失败 3 次会被熔断跳过，不会拖慢任务。
 
-**只有自托管 LibreTranslate（零成本）** → 主引擎 `libretranslate`，回退留空
+**只有自托管 LibreTranslate（零成本）**：
 
 ```
-engine:          libretranslate
+engine_fallback:    libretranslate
 libretranslate_url: http://192.168.x.x:5000
 ```
 
@@ -273,8 +276,7 @@ libretranslate_url: http://192.168.x.x:5000
 
 | 设置                  | 默认       | 说明                                                               |
 | ------------------- | -------- | ---------------------------------------------------------------- |
-| `engine`            | `google` | 主引擎，见上表                                                          |
-| `engine_fallback`   | 空        | 回退链，逗号分隔，前一个失败自动试下一个。留空表示不回退                                     |
+| `engine_fallback`   | 内置默认链    | **翻译引擎链**，逗号分隔，从左往右第一个可用的引擎完成翻译。留空 = 用内置默认 `tencent,alibaba,baidu,deepl,openai,mymemory,google`；凭证缺失的引擎自动跳过。v1.2.6 起原「主翻译引擎」设置已并入这一项 |
 | `target_lang`       | `zh-CN`  | 目标语言，也支持 `zh-TW` / `en` / `ja` / `ko` / `ru`                     |
 | `source_lang`       | `auto`   | 源语言，`auto` 自动检测                                                  |
 | `auto_scene`        | 开        | 场景自动翻译                                                           |
@@ -421,6 +423,7 @@ Stash 找不到 Python。设置 → 系统 → 应用程序路径 → Python 可
 | 链首引擎死掉                    | 上百条数据每条都白等一次超时                                    | Router 熔断（连续失败 3 次即跳过）                         |
 | GraphQL 类型名拼错             | `Unknown type "SUpdateInputcene"`，写回全线失效          | schema 契约测试 + 假服务入口校验                          |
 | 设置项里重复写同一个键（v1.2.4）       | 插件在列表里凭空消失，日志只有 `field type already set in type plugin.SettingConfig` | 清单/索引改走「重复键即报错」的严格 loader（PyYAML 默认会静默覆盖，才让它在本地全绿） |
+| 主引擎与回退链两处配置各说各话（v1.2.6 前） | 改了「主翻译引擎」却没生效，也看不出实际用的哪条链 | 合并成单项「翻译引擎链」（默认值写在代码里），自检日志打印引擎链来源 |
 
 
 

@@ -22,11 +22,27 @@ query PluginSettings($include: [ID!]) {
 }
 """
 
+# --------------------------------------------------------------------------- #
+# 默认引擎链
+#
+# v1.2.6 起只有一个「翻译引擎链」设置，原先那个单独的「主翻译引擎」已取消 ——
+# 两处配置容易互相打架（改了一个忘了另一个，表现就是"我改了怎么没生效"）。
+#
+# Stash 的插件清单不支持声明设置的默认值（pkg/plugin/config.go 里 SettingConfig
+# 只有 type / displayName / description），所以默认链只能写在这儿：设置页留空即生效。
+#
+# 顺序 = 优先级，从左到右。没配凭证的引擎由 Router 自动跳过（进 missing 列表并
+# 在「测试翻译引擎」里列出），不会白白浪费一次请求，所以链可以写长一点。
+# 取舍：付费云服务（质量稳、有额度）→ DeepL / AI → 免费兜底。
+# --------------------------------------------------------------------------- #
+DEFAULT_ENGINE_CHAIN = ("tencent", "alibaba", "baidu", "deepl", "openai",
+                        "mymemory", "google")
+
 DEFAULTS = {
     # 引擎
-    # EDGE 的免费接口已被微软下线（2026-09），所以默认链只留 Google ——
-    # 它是唯一还活着且不需要凭证的引擎。有云端凭证的建议把 tencent 提到第一位。
-    "engine": "google",
+    # 这里故意留空串：空 = 用户没填 = 用 DEFAULT_ENGINE_CHAIN。
+    # 若把默认链直接写在这里，Settings 一构造就把它铺进 _values，
+    # 就再也分不清"用户填了默认链"和"用户根本没填"了（旧版主引擎键的兼容逻辑依赖这个区分）。
     "engine_fallback": "",
     "target_lang": "zh-CN",
     "source_lang": "auto",
@@ -165,17 +181,27 @@ class Settings:
     # -- 派生属性 ---------------------------------------------------------- #
     @property
     def engine_chain(self):
-        """引擎优先级列表，去重并保序。"""
+        """引擎优先级列表，去重并保序。
+
+        设置页留空 → 用内置默认链 DEFAULT_ENGINE_CHAIN。
+
+        兼容旧配置：老版本还有个单独的 `engine`（主翻译引擎）键，它已不再出现在
+        设置页里；只有在「引擎链」也留空时才会被当作链首读一次，免得老用户升级后
+        行为突变。链一旦填了，它就被忽略。
+        """
+        raw = to_str(self._values.get("engine_fallback"))
+        if not raw:
+            legacy = to_str(self._values.get("engine")).lower()
+            if legacy:
+                return [legacy]
+            return list(DEFAULT_ENGINE_CHAIN)
+
         chain = []
-        primary = to_str(self._values.get("engine"), DEFAULTS["engine"]).lower()
-        if primary:
-            chain.append(primary)
-        raw_fallback = to_str(self._values.get("engine_fallback"), DEFAULTS["engine_fallback"])
-        for item in raw_fallback.replace(";", ",").replace(" ", ",").split(","):
+        for item in raw.replace(";", ",").replace("，", ",").replace(" ", ",").split(","):
             item = item.strip().lower()
             if item and item not in chain:
                 chain.append(item)
-        return chain
+        return chain or list(DEFAULT_ENGINE_CHAIN)
 
     @property
     def tag_name_mode(self):
@@ -277,6 +303,17 @@ def load_settings(api, args=None):
         else:
             overrides[key] = to_str(value, DEFAULTS[key])
 
+    # 兼容 v1.2.6 之前的老配置：那时还有个单独的「主翻译引擎」键（engine）。
+    # 它已经不在 DEFAULTS / 设置页里，所以上面那个循环不会碰它，这里单独读一次。
+    # 只有在「翻译引擎链」也留空时才会真正生效（见 Settings.engine_chain）。
+    if "engine" not in overrides:
+        for src in (raw, args):
+            legacy_engine = (src or {}).get("engine")
+            if legacy_engine not in (None, ""):
+                overrides["engine"] = to_str(legacy_engine, "")
+                from_alias.append("engine_fallback<-engine(旧版主引擎键)")
+                break
+
     # bool/int 类型一律按默认值同类型收口，避免字符串混进来
     for key in BOOL_KEYS:
         if key in overrides:
@@ -293,6 +330,21 @@ def load_settings(api, args=None):
         source = "empty"
 
     return Settings(overrides, source=source, read_keys=from_settings + from_alias)
+
+
+def describe_engine_chain(settings):
+    """引擎链来源说明，供「测试翻译引擎」任务打印。
+
+    v1.2.6 起默认链写在代码里（DEFAULT_ENGINE_CHAIN），设置页留空即生效，
+    所以"我的链到底是从哪来的"必须一眼能看出来 —— 否则又是一轮来回排查。
+    """
+    configured = to_str(settings.get("engine_fallback"))
+    if configured:
+        return "设置页：%s" % configured
+    legacy = to_str(settings.get("engine"))
+    if legacy:
+        return "设置页留空，沿用旧版「主翻译引擎」：%s" % legacy
+    return "设置页留空，用内置默认：%s" % ",".join(DEFAULT_ENGINE_CHAIN)
 
 
 def cache_path(plugin_dir, server_dir=""):

@@ -15,7 +15,7 @@ description: >-
   百度、腾讯云、阿里云、Lingva、MyMemory、LibreTranslate、EDGE 免认证接口，
   可配置优先级与失败回退；刮削（场景创建 / 更新）时自动触发，也可在任务页手动批量执行；
   翻译完成后详情页自动刷新显示译文。
-version: 1.2.5
+version: 1.2.6
 url: https://github.com/xheia/stash-plugins
 
 exec:
@@ -111,17 +111,14 @@ ui:
 #   1 引擎选择  2 翻译范围  3 AI 翻译  4 各引擎凭证  5 网络与限流  6 批量与缓存
 # ---------------------------------------------------------------------------
 settings:
-  # ===== ① 引擎选择 =====
-  engine:
-    displayName: 主翻译引擎
-    description: "可填 openai / deepl / tencent / alibaba / baidu / google /
-      mymemory / libretranslate / edge / lingva。免注册：google、mymemory。
-      AI 引擎 openai 质量最好；lingva 公共实例已死，仅自托管可用"
-    type: STRING
-
+  # ===== ① 引擎选择（只有这一项：按优先级排的引擎链）=====
   engine_fallback:
-    displayName: 回退引擎链
-    description: 主引擎失败时按顺序尝试，英文逗号分隔，如 tencent,alibaba,mymemory
+    displayName: 翻译引擎链（按优先级）
+    description: "英文逗号分隔，从左往右依次尝试，第一个可用的引擎完成翻译。
+      留空即用内置默认链：tencent,alibaba,baidu,deepl,openai,mymemory,google。
+      没配凭证的引擎会被自动跳过，不会浪费请求。
+      可填：openai / deepl / tencent / alibaba / baidu / google / mymemory /
+      libretranslate / edge / lingva（openai 质量最好；lingva 公共实例已死，仅自托管可用）"
     type: STRING
 
   # ===== ② 明细参数（所有引擎共用）=====
