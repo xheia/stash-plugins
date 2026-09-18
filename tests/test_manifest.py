@@ -45,6 +45,44 @@ def load_build_module():
     return module
 
 
+# ---- 严格解析：重复键检测 ---------------------------------------------------- #
+# v1.2.4 出过一次事故：整合设置页时 settings 里同一个设置项被写了两遍 type，
+# PyYAML 默认让后者覆盖前者，本地测试全绿；Stash 侧的 yaml 严格解析却直接
+# 整份加载失败 —— 插件在界面上凭空"消失"，日志里只有一行
+# "field type already set in type plugin.SettingConfig"。
+# 所以清单和索引一律走这个 loader，重复键立刻报出来。
+class DuplicateKeyError(Exception):
+    pass
+
+
+class UniqueKeyLoader(yaml.SafeLoader):
+    """任何映射节点出现重复键就抛 DuplicateKeyError，模拟 Stash 的严格解析。"""
+
+
+def _construct_unique_mapping(loader, node, deep=False):
+    mapping = {}
+    first_line = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in mapping:
+            raise DuplicateKeyError(
+                "重复键 %r：第 %d 行重复了第 %d 行的定义"
+                % (key, key_node.start_mark.line + 1, first_line[key]))
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+        first_line[key] = key_node.start_mark.line + 1
+    return mapping
+
+
+UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_mapping)
+
+
+def load_strict(path):
+    """解析 yaml，遇到重复键抛 DuplicateKeyError（Stash 的行为）。"""
+    with open(path, "r", encoding="utf-8") as handle:
+        return yaml.load(handle, Loader=UniqueKeyLoader)
+
+
 # ---- 来自 pkg/plugin/config.go 的字段白名单 ---------------------------------- #
 TOP_KEYS = {"name", "description", "url", "version", "interface", "exec",
             "errLog", "tasks", "hooks", "ui", "settings"}
@@ -81,10 +119,22 @@ def unknown_keys(mapping, allowed, where):
 
 
 def main():
-    with open(MANIFEST, "r", encoding="utf-8") as handle:
-        manifest = yaml.safe_load(handle)
-
     print("清单: %s" % os.path.relpath(MANIFEST, ROOT))
+
+    print("\n0) 严格解析（重复键 / 结构）")
+    duplicate = None
+    try:
+        manifest = load_strict(MANIFEST)
+    except DuplicateKeyError as exc:
+        duplicate = exc
+        with open(MANIFEST, "r", encoding="utf-8") as handle:
+            manifest = yaml.safe_load(handle)
+    except yaml.YAMLError as exc:
+        check("清单能被解析", False, str(exc))
+        raise SystemExit(1)
+    check("清单里没有重复键（Stash 严格解析会整份失败）",
+          duplicate is None,
+          "%s —— 请删掉多出来的那一行" % duplicate)
 
     print("\n1) 顶层字段")
     unknown = unknown_keys(manifest, TOP_KEYS, "顶层")
@@ -189,8 +239,14 @@ def main():
 
     print("\n7) 插件索引（plugins/main/index.yml）")
     if os.path.exists(INDEX):
-        with open(INDEX, "r", encoding="utf-8") as handle:
-            index = yaml.safe_load(handle) or []
+        index_dup = None
+        try:
+            index = load_strict(INDEX) or []
+        except DuplicateKeyError as exc:
+            index_dup = exc
+            with open(INDEX, "r", encoding="utf-8") as handle:
+                index = yaml.safe_load(handle) or []
+        check("索引里没有重复键", index_dup is None, str(index_dup))
         check("索引是列表", isinstance(index, list))
         entry = next((e for e in index if e.get("id") == PLUGIN_ID), None)
         check("索引里有 %s" % PLUGIN_ID, entry is not None)

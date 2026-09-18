@@ -356,6 +356,11 @@ libretranslate_url: http://192.168.x.x:5000
 **插件列表里看不到插件**  
 清单 YAML 有任何未知字段都会导致整份加载失败且不报错。跑一下 `python3 tests/test_manifest.py` 定位问题。
 
+**日志里报 `field xxx already set in type plugin.SettingConfig`**  
+清单里同一个设置项写了重复的键（v1.2.4 的 `libretranslate_api_key` 就多写了一行 `type`），  
+Stash 的严格解析会因此整份拒绝加载 —— 插件不会报错，只是在列表里消失。删掉多出来的那行即可。  
+`python3 tests/test_manifest.py` 的「严格解析」一节会把重复键和行号直接报出来。
+
 **日志里报 `no such file or directory: python3`**  
 Stash 找不到 Python。设置 → 系统 → 应用程序路径 → Python 可执行文件路径，填绝对路径。
 
@@ -415,6 +420,7 @@ Stash 找不到 Python。设置 → 系统 → 应用程序路径 → Python 可
 | LibreTranslate 输出 `相相相相…` | 垃圾译文被当成成功写进库                                      | `looks_degenerate()` 拦截并降级                     |
 | 链首引擎死掉                    | 上百条数据每条都白等一次超时                                    | Router 熔断（连续失败 3 次即跳过）                         |
 | GraphQL 类型名拼错             | `Unknown type "SUpdateInputcene"`，写回全线失效          | schema 契约测试 + 假服务入口校验                          |
+| 设置项里重复写同一个键（v1.2.4）       | 插件在列表里凭空消失，日志只有 `field type already set in type plugin.SettingConfig` | 清单/索引改走「重复键即报错」的严格 loader（PyYAML 默认会静默覆盖，才让它在本地全绿） |
 
 
 
