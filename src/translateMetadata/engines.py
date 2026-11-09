@@ -377,6 +377,11 @@ class BaseEngine:
     # 不发请求、不算失败、不进熔断 —— 上限是引擎的固有属性，不是故障。
     max_source_bytes = None
 
+    # 批量能力（v1.4.0）：一次请求最多合并多少条 / 多少字符。
+    # batch_items = 1 表示该引擎不支持合并，Router 会自动逐条调用。
+    batch_items = 1
+    batch_chars = 0
+
     # 各引擎自己的默认值 —— v1.2.7 起设置页不再暴露「请求超时 / 重试次数 / 重试等待」，
     # 由这里兜底；子类按自身特点覆盖（LLM 慢，给 120s）。
     # 任务参数里显式传 timeout_s / retry_times 仍然优先。
@@ -442,6 +447,14 @@ class BaseEngine:
         """返回 (译文, 检出语言)。必须由子类实现。"""
         raise NotImplementedError
 
+    def translate_many(self, texts, source="auto", target="zh-CN"):
+        """批量翻译，返回与 texts 等长的 [(译文, detected), ...]。
+
+        默认逐条调用；支持的引擎覆盖它。批量实现必须保证**顺序与数量一致**，
+        否则 Router 会当整批失败并降级到下一个引擎（宁可慢，不可错位）。
+        """
+        return [self.translate_detailed(t, source, target) for t in texts]
+
     def translate(self, text, source="auto", target="zh-CN"):
         return self.translate_detailed(text, source, target)[0]
 
@@ -465,6 +478,9 @@ class BaseEngine:
 class EdgeEngine(BaseEngine):
     name = "edge"
     API_URL = "https://edge.microsoft.com/translate/translatetext"
+    # 微软端点支持一次传多段（body 为字符串数组，响应按顺序返回数组）
+    batch_items = 40
+    batch_chars = 4000
     UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
           "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0")
     BLOCKED_HINT = (
@@ -504,6 +520,41 @@ class EdgeEngine(BaseEngine):
         dl = (item or {}).get("detectedLanguage") or {}
         detected = dl.get("language")
         return translated, detected
+
+    def translate_many(self, texts, source="auto", target="zh-CN"):
+        if len(texts) <= 1:
+            return [self.translate_detailed(t, source, target) for t in texts]
+
+        params = {"api-version": "3.0", "to": self.lang(target)}
+        if source and source != "auto":
+            params["from"] = self.lang(source)
+        url = self.api_url + "?" + urllib.parse.urlencode(params)
+
+        data = self._request(
+            url,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": self.UA,
+                "Origin": "https://www.microsoft.com",
+                "Referer": "https://www.microsoft.com/",
+                "Accept": "*/*",
+            },
+            payload=list(texts),
+        )
+        items = data if isinstance(data, list) else [data]
+        if len(items) != len(texts):
+            raise EngineError("EDGE 批量返回数量不匹配（%d != %d）"
+                              % (len(items), len(texts)))
+        results = []
+        for item in items:
+            try:
+                translated = item["translations"][0]["text"]
+            except (KeyError, IndexError, TypeError) as exc:
+                raise EngineError("EDGE 批量响应结构异常: %s"
+                                  % (json.dumps(data, ensure_ascii=False)[:200],)) from exc
+            results.append((translated, (item.get("detectedLanguage") or {}).get("language")))
+        return results
 
     # 免认证端点的连接失败要带上可读提示，而不是干巴巴的 "Connection reset"
     def _request(self, url, method="POST", headers=None, payload=None, form=None):
@@ -575,6 +626,10 @@ class GoogleEngine(BaseEngine):
 class BaiduEngine(BaseEngine):
     name = "baidu"
     API_URL = "https://fanyi-api.baidu.com/api/trans/vip/translate"
+    # 百度用 \n 分隔多段，响应 trans_result 按行返回；单请求 q 上限 6000 字节。
+    # 1500 字符对中文（3 字节/字）约 4500 字节，留足余量。
+    batch_items = 40
+    batch_chars = 1500
 
     def __init__(self, options=None):
         super().__init__(options)
@@ -621,6 +676,40 @@ class BaiduEngine(BaseEngine):
         # 百度按换行拆分成多条，按顺序拼回去
         translated = "\n".join(item.get("dst", "") for item in results)
         return translated, data.get("from")
+
+    def translate_many(self, texts, source="auto", target="zh-CN"):
+        # 含换行的文本没法用「按行拆分」的方式合并，交给逐条路径
+        if len(texts) <= 1 or any("\n" in t or "\r" in t for t in texts):
+            return [self.translate_detailed(t, source, target) for t in texts]
+        if not self.available():
+            raise EngineError("百度翻译未配置 AppID / 密钥")
+
+        joined = "\n".join(texts)
+        salt = str(int(time.time() * 1000))
+        sign = hashlib.md5(
+            (self.appid + joined + salt + self.key).encode("utf-8")
+        ).hexdigest()
+        data = self._request(
+            self.api_url,
+            method="POST",
+            form={
+                "q": joined,
+                "from": self.lang(source) if source and source != "auto" else "auto",
+                "to": self.lang(target),
+                "appid": self.appid,
+                "salt": salt,
+                "sign": sign,
+            },
+        )
+        if data.get("error_code"):
+            raise api_error("百度翻译报错 %s: %s"
+                            % (data.get("error_code"), data.get("error_msg")))
+        results = data.get("trans_result") or []
+        if len(results) != len(texts):
+            raise EngineError("百度批量返回数量不匹配（%d != %d）"
+                              % (len(results), len(texts)))
+        detected = data.get("from")
+        return [(item.get("dst", ""), detected) for item in results]
 
 
 # --------------------------------------------------------------------------- #
@@ -960,6 +1049,10 @@ class AlibabaEngine(BaseEngine):
 # --------------------------------------------------------------------------- #
 class LibreTranslateEngine(BaseEngine):
     name = "libretranslate"
+    # 新版 LibreTranslate 的 q 支持字符串数组，translatedText 也按数组返回。
+    # 老实例只认单条 —— Router 会按返回结构自动降级。
+    batch_items = 20
+    batch_chars = 3000
 
     def __init__(self, options=None):
         super().__init__(options)
@@ -994,6 +1087,35 @@ class LibreTranslateEngine(BaseEngine):
             raise EngineError("LibreTranslate 未返回译文: %s" % (errors or json.dumps(data, ensure_ascii=False)[:200],))
         return translated, data.get("detectedLanguage", {}).get("language")
 
+    def translate_many(self, texts, source="auto", target="zh-CN"):
+        if len(texts) <= 1:
+            return [self.translate_detailed(t, source, target) for t in texts]
+
+        payload = {
+            "q": list(texts),
+            "source": self.lang(source) if source and source != "auto" else "auto",
+            "target": self.lang(target),
+            "format": "text",
+        }
+        if self.api_key:
+            payload["api_key"] = self.api_key
+
+        data = self._request(
+            self.base_url + "/translate",
+            method="POST",
+            headers={"Content-Type": "application/json"},
+            payload=payload,
+        )
+        translated = data.get("translatedText")
+        if not isinstance(translated, list):
+            # 老版本只支持单条：这批请求已经发出去了，退回逐条（结果正确优先）
+            return [self.translate_detailed(t, source, target) for t in texts]
+        if len(translated) != len(texts):
+            raise EngineError("LibreTranslate 批量返回数量不匹配（%d != %d）"
+                              % (len(translated), len(texts)))
+        detected = (data.get("detectedLanguage") or {}).get("language")
+        return [(item, detected) for item in translated]
+
     def detect(self, text):
         payload = {"q": text}
         if self.api_key:
@@ -1017,6 +1139,9 @@ class LibreTranslateEngine(BaseEngine):
 class DeepLEngine(BaseEngine):
     name = "deepl"
     DEFAULT_URL = "https://api-free.deepl.com/v2"
+    # DeepL 支持一次提交多个 text（表单重复字段），响应 translations 按顺序返回
+    batch_items = 50
+    batch_chars = 8000
 
     def __init__(self, options=None):
         super().__init__(options)
@@ -1081,6 +1206,49 @@ class DeepLEngine(BaseEngine):
             raise EngineError("DeepL 未返回译文: %s" % (json.dumps(data, ensure_ascii=False)[:200],))
         return translations[0]["text"], translations[0].get("detected_source_language")
 
+    def translate_many(self, texts, source="auto", target="zh-CN"):
+        if len(texts) <= 1:
+            return [self.translate_detailed(t, source, target) for t in texts]
+        if not self.available():
+            raise EngineError("DeepL 未配置 API Key（deepl.com 免费注册，Key 以 :fx 结尾）")
+
+        pairs = [("text", t) for t in texts]
+        pairs.append(("target_lang", self.lang(target)))
+        if source and source != "auto":
+            pairs.append(("source_lang", self.lang(source)))
+
+        self._throttle()
+        status, raw = http_request(
+            self.api_url,
+            method="POST",
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Authorization": "DeepL-Auth-Key " + self.auth_key,
+            },
+            data=urllib.parse.urlencode(pairs).encode("utf-8"),
+            timeout=self.timeout,
+            proxy=self.proxy,
+            retries=self.retries,
+            backoff_ms=self.backoff_ms,
+        )
+        try:
+            data = json.loads(raw.decode("utf-8", "replace"))
+        except ValueError as exc:
+            raise EngineError("DeepL 响应不是 JSON: %s" % (raw[:200],)) from exc
+        if status == 403:
+            raise EngineError("DeepL 认证失败 (HTTP 403)：Key 无效或填错档位")
+        if status == 456:
+            raise EngineQuotaError("DeepL 配额已用完 (HTTP 456)：本月免费额度耗尽")
+        if status != 200:
+            raise api_error("DeepL HTTP %s: %s"
+                            % (status, data.get("message") or brief(raw.decode("utf-8", "replace"))))
+        translations = data.get("translations") or []
+        if len(translations) != len(texts):
+            raise EngineError("DeepL 批量返回数量不匹配（%d != %d）"
+                              % (len(translations), len(texts)))
+        return [(item.get("text", ""), item.get("detected_source_language"))
+                for item in translations]
+
 
 # --------------------------------------------------------------------------- #
 # 8. AI 翻译（OpenAI 兼容接口）—— 一个配置通吃所有兼容端点：
@@ -1102,14 +1270,16 @@ class OpenAIEngine(BaseEngine):
         "en": "English", "ja": "日本語", "ko": "한국어", "ru": "Русский",
     }
 
+    # 提示词刻意保持极短：每次请求都按 token 计费，冗长的规则说明是纯开销。
+    # 需要额外风格约束时用设置页的 openai_prompt 覆盖。
     DEFAULT_PROMPT = (
-        "You are a professional subtitle/metadata translator. "
-        "Translate the user's text into {lang}. Requirements:\n"
-        "1. Return ONLY the translation, with no explanations, no quotes, no prefix.\n"
-        "2. Keep numbers, version markers (e.g. #456), URLs and file extensions unchanged.\n"
-        "3. Person names may stay in Latin letters if translating them looks awkward.\n"
-        "4. Match the tone of the original (colloquial stays colloquial)."
+        "Translate into {lang}. Output only the translation, no quotes or notes. "
+        "Keep numbers, URLs, IDs and proper names unchanged."
     )
+
+    # 一次请求翻多条的软上限（按条数/字符切块），把 system prompt 摊薄
+    batch_items = 20
+    batch_chars = 6000
 
     def __init__(self, options=None):
         super().__init__(options)
@@ -1191,6 +1361,71 @@ class OpenAIEngine(BaseEngine):
             raise EngineError("AI 翻译返回了空内容")
         return content, None
 
+    def translate_many(self, texts, source="auto", target="zh-CN"):
+        """一次请求翻多条：把 system prompt 摊薄，显著降低 token 开销。"""
+        if len(texts) <= 1:
+            return [self.translate_detailed(t, source, target) for t in texts]
+        if not self.available():
+            raise EngineError("AI 翻译未配置：请填接口地址（openai_base_url）或 API Key（openai_api_key）")
+
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = "Bearer " + self.api_key
+
+        lang = self.LANG_PROMPT.get(self.lang(target), self.lang(target))
+        if self.custom_prompt:
+            instruction = self.custom_prompt + "\nReturn ONLY a JSON array of strings, same order."
+        else:
+            instruction = ("Translate every string in the JSON array into %s. "
+                           "Output ONLY a JSON array of strings, same length and order. "
+                           "Keep numbers, URLs, IDs and proper names unchanged." % lang)
+
+        payload = {
+            "model": self.model,
+            "temperature": 0.2,
+            "stream": False,
+            "messages": [
+                {"role": "system", "content": instruction},
+                {"role": "user", "content": json.dumps(list(texts), ensure_ascii=False)},
+            ],
+        }
+
+        self._throttle()
+        data = json_request(
+            self.base_url + "/chat/completions",
+            method="POST",
+            headers=headers,
+            payload=payload,
+            timeout=max(self.timeout, 60),
+            proxy=self.proxy,
+            retries=self.retries,
+            backoff_ms=self.backoff_ms,
+        )
+        if data.get("error"):
+            err = data["error"]
+            raise EngineError("AI 翻译报错: %s" % (
+                err.get("message") if isinstance(err, dict) else err))
+        choices = data.get("choices") or []
+        if not choices:
+            raise EngineError("AI 翻译未返回结果: %s"
+                              % (json.dumps(data, ensure_ascii=False)[:200],))
+        content = ((choices[0].get("message") or {}).get("content") or "").strip()
+
+        # 模型有时会包一层 ```json 代码块
+        if content.startswith("```"):
+            content = content.strip("`")
+            if content.lower().startswith("json"):
+                content = content[4:]
+            content = content.strip()
+        try:
+            parsed = json.loads(content)
+        except ValueError:
+            # 解析失败就退回逐条，保证结果正确（这批 token 已经花掉了）
+            return [self.translate_detailed(t, source, target) for t in texts]
+        if not isinstance(parsed, list) or len(parsed) != len(texts):
+            return [self.translate_detailed(t, source, target) for t in texts]
+        return [(str(item or "").strip(), None) for item in parsed]
+
 
 # --------------------------------------------------------------------------- #
 # 引擎注册表
@@ -1253,6 +1488,11 @@ class Router:
         # 停用 != 熔断：熔断是"连续失败若干次后暂时歇一会儿"，这里是一次定性 ——
         # 没额度 / Key 错了，后面每条文本再试都是白打请求。
         self._disabled = {}
+
+        # 用量统计（v1.4.0）：实际发给平台的原文长度与请求次数。
+        # 失败/重试的请求也算 —— 平台侧可能已经计费，宁可多算不可少算。
+        self.chars_sent = 0
+        self.requests_sent = 0
 
         for name in engine_names:
             name = (name or "").strip().lower()
@@ -1367,6 +1607,8 @@ class Router:
                               % (engine.name, source_bytes, engine.max_source_bytes))
                 continue
             try:
+                self.chars_sent += len(text)
+                self.requests_sent += 1
                 translated, detected = engine.translate_detailed(text, source, target)
             except EngineError as exc:
                 # 额度 / 凭证类：本轮直接停用该引擎（重试没意义），
@@ -1411,6 +1653,87 @@ class Router:
         if stop is not None:
             raise stop
         raise EngineError(self.failure_message(errors))
+
+    # -- 批量 -------------------------------------------------------------- #
+    def _batch_chunks(self, engine, texts):
+        """按引擎能力切块；单条引擎（batch_items=1）自然退化成逐条。"""
+        max_items = max(1, int(getattr(engine, "batch_items", 1) or 1))
+        max_chars = int(getattr(engine, "batch_chars", 0) or 0)
+        chunk, size = [], 0
+        for text in texts:
+            if engine.max_source_bytes and len(text.encode("utf-8")) > engine.max_source_bytes:
+                continue
+            if chunk and (len(chunk) >= max_items
+                          or (max_chars and size + len(text) > max_chars)):
+                yield chunk
+                chunk, size = [], 0
+            chunk.append(text)
+            size += len(text)
+        if chunk:
+            yield chunk
+
+    def translate_many(self, texts, source="auto", target="zh-CN"):
+        """批量翻译，返回 {原文: (译文, 引擎, detected)}。
+
+        合并请求的意义：一次批量任务动辄上百条文本，逐条请求不仅慢，
+        每条都要重复付一次「固定开销」（HTTP 往返、鉴权、LLM 的 system prompt）。
+        失败的文本不会出现在结果里，由调用方决定是否单独重试。
+        """
+        results = {}
+        pending = [t for t in texts if t]
+        if not pending:
+            return results
+
+        errors = []
+        for engine in self.engines:
+            if not pending:
+                break
+            if engine.name in self._benched or engine.name in self._disabled:
+                continue
+
+            failed_engine = False
+            for chunk in self._batch_chunks(engine, pending):
+                try:
+                    self.chars_sent += sum(len(t) for t in chunk)
+                    self.requests_sent += 1
+                    pairs = engine.translate_many(chunk, source, target)
+                    if len(pairs) != len(chunk):
+                        raise EngineError("批量返回数量不匹配（%d != %d）"
+                                          % (len(pairs), len(chunk)))
+                except EngineError as exc:
+                    if not self.classify_and_mark(engine.name, str(exc), exc):
+                        self._note_failure(engine.name)
+                    errors.append("%s(批量): %s" % (engine.name, exc))
+                    failed_engine = True
+                    break
+                except Exception as exc:
+                    self._note_failure(engine.name)
+                    errors.append("%s(批量): 意外错误 %s" % (engine.name, exc))
+                    failed_engine = True
+                    break
+
+                for text, pair in zip(chunk, pairs):
+                    translated, detected = pair
+                    if translated is None:
+                        continue
+                    if translated != text and detect.looks_degenerate(translated):
+                        continue
+                    if source in ("", "auto", None) and is_chinese_code(detected):
+                        translated = text
+                    results[text] = (translated.strip(), engine.name, detected)
+
+                self._note_success(engine.name)
+                pending = [t for t in pending if t not in results]
+
+            if failed_engine:
+                continue
+
+        if not results:
+            stop = self.stop_exception()
+            if stop is not None:
+                raise stop
+            raise EngineError(self.failure_message(errors))
+        return results
 
     # -- 失败时的完整交代 -------------------------------------------------- #
     def _proxy_display(self):

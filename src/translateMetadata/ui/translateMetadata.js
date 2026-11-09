@@ -20,11 +20,27 @@
 
   var React = PluginApi.React;
   var h = React.createElement;
-  var Button = PluginApi.libraries.Bootstrap.Button;
-  var NavLink = PluginApi.libraries.ReactRouterDOM.NavLink;
-  var solid = PluginApi.libraries.FontAwesomeSolid;
+  // 库访问全部做保护：任何一个库缺失都不该让整个 UI 脚本抛异常，
+  // 更不能影响同一页面里的其它插件。
+  var libs = PluginApi.libraries || {};
+  var Button = (libs.Bootstrap || {}).Button || "button";
+  var NavLink =
+    (libs.ReactRouterDOM || {}).NavLink ||
+    function (props) {
+      return h("a", { href: props.to }, props.children);
+    };
+  var solid = libs.FontAwesomeSolid || {};
   var faIcon = solid.faLanguage || solid.faGlobe || solid.faEthernet;
-  var useToast = PluginApi.hooks.useToast;
+  var useToast =
+    PluginApi.hooks && PluginApi.hooks.useToast
+      ? PluginApi.hooks.useToast
+      : function () {
+          return {
+            toast: function () {},
+            success: function () {},
+            error: function () {},
+          };
+        };
 
   var PLUGIN_ID = "translateMetadata";
   var RUN_OP_MUTATION =
@@ -84,6 +100,11 @@
       });
   }
 
+  // 防抖：CF 隧道/弱网下按钮可能被连点，重复 runPluginOperation 会把额度打爆。
+  // 1.2 秒内的重复点击直接忽略；真正执行期间还有 busy 状态兜底。
+  var lastRunAt = 0;
+  var DEBOUNCE_MS = 1200;
+
   function TranslateNavItem() {
     var toast = useToast();
     var state = React.useState(false);
@@ -97,6 +118,12 @@
       if (!target) {
         return;
       }
+      var now = Date.now();
+      if (now - lastRunAt < DEBOUNCE_MS) {
+        return;
+      }
+      lastRunAt = now;
+
       setBusy(true);
       toast.toast({
         content:
@@ -173,17 +200,81 @@
     );
   }
 
-  PluginApi.patch.before("MainNavBar.UtilityItems", function (props) {
-    return [
-      {
-        children: h(
-          React.Fragment,
-          null,
-          h(TranslateNavItem),
-          h(TasksNavItem),
-          props.children
-        ),
-      },
-    ];
-  });
+  // 错误隔离：我们的按钮渲染失败（图标库缺失、API 变更等）绝不能把整个导航栏
+  // 一起带崩 —— 否则同在这块 DOM 里的其它插件（如 SFWSwitch）会跟着消失。
+  class ErrorCatcher extends React.Component {
+    constructor(p) {
+      super(p);
+      this.state = { failed: false };
+    }
+    static getDerivedStateFromError() {
+      return { failed: true };
+    }
+    componentDidCatch(err) {
+      try {
+        console.error("[Metadata Translator] 导航栏按钮渲染失败：", err);
+      } catch (e) {
+        /* 忽略 */
+      }
+    }
+    render() {
+      return this.state.failed ? null : this.props.children;
+    }
+  }
+
+  // 只在桌面导航栏（.navbar-buttons）里渲染。MainNavBar.UtilityItems 在页面上
+  // 有两处（移动端折叠菜单 + 桌面按钮区），不加以区分会出现两套按钮，
+  // 也会让 React 更频繁地改动 .navbar-buttons 的子树。
+  function NavSlot() {
+    var ref = React.useRef(null);
+    var state = React.useState(false);
+    var visible = state[0];
+    var setVisible = state[1];
+
+    React.useEffect(function () {
+      var el = ref.current;
+      try {
+        if (el && el.closest && el.closest(".navbar-buttons")) {
+          setVisible(true);
+        }
+      } catch (e) {
+        /* 忽略：老浏览器没有 closest 就保持隐藏 */
+      }
+    }, []);
+
+    return h(
+      "span",
+      { ref: ref, style: { display: visible ? "contents" : "none" } },
+      visible
+        ? h(
+            React.Fragment,
+            null,
+            h(ErrorCatcher, { key: "mt-translate" }, h(TranslateNavItem)),
+            h(ErrorCatcher, { key: "mt-tasks" }, h(TasksNavItem))
+          )
+        : null
+    );
+  }
+
+  try {
+    PluginApi.patch.before("MainNavBar.UtilityItems", function (props) {
+      return [
+        {
+          children: h(
+            React.Fragment,
+            null,
+            h(NavSlot, { key: "metadata-translator-nav" }),
+            props.children
+          ),
+        },
+      ];
+    });
+  } catch (e) {
+    // 注册失败就静默降级：后端任务与 Hook 仍然可用，不影响任何其它插件。
+    try {
+      console.error("[Metadata Translator] 导航栏注册失败：", e);
+    } catch (ignored) {
+      /* 忽略 */
+    }
+  }
 })();

@@ -4,7 +4,7 @@
 
 ## Metadata Translator
 
-把 Stash 里的**标题与简介**自动翻译成中文。支持 **AI 翻译（OpenAI 兼容，可接 DeepSeek / Ollama / 智谱等）、Google、DeepL、腾讯云、阿里云、百度、MyMemory、LibreTranslate、EDGE 免认证接口** 九种引擎，可配置优先级与失败自动回退。
+把 Stash 里的**标题与简介**自动翻译成中文。支持 **AI 翻译（OpenAI 兼容，可接 DeepSeek / Ollama / 智谱等）、Google、DeepL、腾讯云、阿里云、百度、LibreTranslate、EDGE 免认证接口** 八种引擎，可配置优先级与失败自动回退。
 
 覆盖四个实体：
 
@@ -67,7 +67,7 @@ python3 tests/test_pipeline.py
 | ------ | -------------------------------------------------------------------- |
 | Stash  | v0.31.x（在 v0.31.1 上开发与验证）                                            |
 | Python | 3.8+，**只需要标准库**，不需要 `pip install` 任何东西                               |
-| 网络     | 看所选引擎：国产云（腾讯 / 阿里 / 百度）与 mymemory 国内直连即可；google / deepl 需代理 |
+| 网络     | 看所选引擎：国产云（腾讯 / 阿里 / 百度）国内直连即可；google / deepl / edge 需代理 |
 
 ### 各部署环境对照
 
@@ -158,7 +158,6 @@ python3 build.py --check    # 只预览会打包哪些文件
 | `deepl`          | API Key（免费档以 `:fx` 结尾）        | 每月 50 万字符                    | **不通**（需代理）              | 好                   |
 | `libretranslate` | 视实例而定                         | 取决于自托管                       | 通                        | **一般**（可能吐出退化内容，见下） |
 | `google`         | 不需要                           | 无明确限制                        | **不通**（需代理）              | 好                   |
-| `mymemory`       | 不需要（可填邮箱提额）                   | 匿名约 1000 词/天；填邮箱约 5 万词/天     | 通                        | 一般；单次上限 500 字节      |
 | `edge`           | 不需要                           | —                            | **常被重置**                 | 好（微软同源）             |
 
 > ### EDGE 免认证端点（2026-09 复核）
@@ -176,7 +175,7 @@ python3 build.py --check    # 只预览会打包哪些文件
 > 代理路径（Clash 类工具若把微软域名放直连规则，同样会失败）。装好后跑一次  
 > 「测试翻译引擎」即可确认。不通就换 `google` / `openai`。
 
-> **国内直连环境下真正免注册可用的是 `mymemory`**，配 `openai`（接 DeepSeek / 智谱等国产 API）质量最好。  
+> **国内直连环境下真正免注册可用的是 `edge`**（是否通取决于你到微软的线路），配 `openai`（接 DeepSeek / 智谱等国产 API）质量最好。  
 > Google 的免费端点 `translate.googleapis.com` 在国内不通，且对出口 IP 限流很凶（HTTP 429）。  
 > 代理无需在插件里配置——不手动设置时自动使用**系统代理**（环境变量 `HTTP_PROXY`/`HTTPS_PROXY`，Docker 容器里即容器环境变量）。
 >
@@ -194,13 +193,13 @@ python3 build.py --check    # 只预览会打包哪些文件
 > 改了一个忘了另一个，表现就是"我明明改了怎么没生效"。老配置里的 `engine` 键仍会被读一次，
 > 只在引擎链留空时当作链首，升级后行为不会突变。
 >
-> **引擎链留空 = 用内置默认值**：`tencent,alibaba,baidu,deepl,openai,mymemory,google`。
+> **引擎链留空 = 用内置默认值**：`tencent,alibaba,baidu,deepl,openai,google`。
 > 没配凭证的引擎会被自动跳过（在「测试翻译引擎」日志里列为"缺少凭证"），所以默认链对谁都安全。
 
 **有 AI API（质量首选）**：把 `openai` 放链首
 
 ```
-engine_fallback: openai,tencent,mymemory
+engine_fallback: openai,tencent,baidu
 openai_base_url: https://api.deepseek.com        # 或 Ollama http://localhost:11434
 openai_api_key:  sk-xxx                          # Ollama / LM Studio 留空
 openai_model:    deepseek-chat                   # 或 glm-4-flash / qwen2.5:7b 等
@@ -212,7 +211,7 @@ LLM 翻译对这类内容优势明显：能理解上下文、保留 `#456` 这�
 **国内直连（无 AI）**：把云厂商排前面
 
 ```
-engine_fallback: tencent,alibaba,mymemory
+engine_fallback: tencent,alibaba,baidu
 ```
 
 **有代理**：
@@ -225,12 +224,12 @@ engine_fallback: google,tencent,alibaba
 **完全零成本**：
 
 ```
-engine_fallback: mymemory,google
+engine_fallback: edge,google
 ```
 
 > ⚠️ **Lingva 引擎已移除（v1.2.8）**：公共实例在 2026-09 实测全部不可用
 > （Cloudflare 403 / 下线 / 500），引擎连同 `lingva_instance` 设置一并删除。
-> 以前靠它的请改用 `mymemory`（国内直连、匿名可用）或 `google`（需代理）。
+> 以前靠它的请改用 `edge`（免注册，视线路）或 `google`（需代理）。
 
 **只有自托管 LibreTranslate（零成本）**：
 
@@ -274,7 +273,7 @@ libretranslate_url: http://192.168.x.x:5000
 
 | 设置                  | 默认       | 说明                                                               |
 | ------------------- | -------- | ---------------------------------------------------------------- |
-| `engine_fallback`   | 内置默认链    | **翻译引擎链**，逗号分隔，从左往右第一个可用的引擎完成翻译。留空 = 用内置默认 `tencent,alibaba,baidu,deepl,openai,mymemory,google`；凭证缺失的引擎自动跳过。v1.2.6 起原「主翻译引擎」设置已并入这一项 |
+| `engine_fallback`   | 内置默认链    | **翻译引擎链**，逗号分隔，从左往右第一个可用的引擎完成翻译。留空 = 用内置默认 `tencent,alibaba,baidu,deepl,openai,google`；凭证缺失的引擎自动跳过。v1.2.6 起原「主翻译引擎」设置已并入这一项 |
 | `target_lang`       | `zh-CN`  | 目标语言，也支持 `zh-TW` / `en` / `ja` / `ko` / `ru`                     |
 | `source_lang`       | `auto`   | 源语言，`auto` 自动检测                                                  |
 | `auto_scene`        | 开        | 场景自动翻译                                                           |
@@ -290,7 +289,12 @@ libretranslate_url: http://192.168.x.x:5000
 | `rate_limit_ms`     | `300`    | 两次请求的最小间隔，防止触发限流                                                 |
 | `engine_skip_after` | `3`      | 某引擎连续失败这么多次后，本轮不再试它（熔断）。0 = 关闭                                   |
 | `batch_size`        | `100`    | 批量任务每页条数                                                         |
-| `cache_enabled`     | 开        | 相同文本只请求一次接口                                                      |
+| `cache_enabled`     | 开        | 相同文本只请求一次接口；缓存键**与引擎链无关**，换引擎不会重翻                     |
+| `max_chars_per_run` | `0`      | **单次任务字符上限**，0 = 不限。达到后正常收尾，下次继续（防止一次跑完整库打爆额度）          |
+| `daily_char_budget` | `0`      | **每日字符上限**，0 = 不限。跨进程计数、按自然日重置，批量刮削时兜底                     |
+| `min_chars`         | `3`      | 短于这个长度直接跳过（`4K` / `HD` 之类不占请求）                                  |
+| `skip_terms`        | 空        | 跳过词表，逗号/换行分隔；原文包含任一词就不翻译（品牌名、番号前缀等）                       |
+| `stash_api_key`     | 空        | 一般**留空**：自动读 Stash `config.yml` 的 `api_key`；读不到时才需手填            |
 | `http_proxy`        | 空        | **已从设置页收起**：留空即使用系统代理（环境变量 `HTTP_PROXY`/`HTTPS_PROXY`）；如需临时手动指定仍可经任务参数传入 |
 
 > **v1.2.7 撤掉了「单次实际翻译上限 / 请求超时 / 瞬时错误重试次数 / 重试等待」四项设置。**
@@ -319,12 +323,47 @@ libretranslate_url: http://192.168.x.x:5000
 | `baidu_url`         | `fanyi-api.baidu.com/api/trans/vip/translate` | 一般不用改                                     |
 | `tencent_url`       | `tmt.tencentcloudapi.com`                  | 支持内网网关；填 `tmt.<地域>.tencentcloudapi.com` 会自动取地域 |
 | `alibaba_url`       | `mt.aliyuncs.com`                          | 也可直接填 `cn-hangzhou` 这类地域                    |
-| `mymemory_url`      | `api.mymemory.translated.net/get`          | 一般不用改                                     |
 | `deepl_api_url`     | 按 Key 档位自动选 `api-free` / `api`             | 走代理或中转时用                                  |
 | `libretranslate_url` | `http://localhost:5000`                    | 该服务没有公共实例，必须填自托管地址                        |
 
 > 各引擎的**超时与重试**不在这里配：每个引擎自带默认值（机翻 20s / 重试 1 次 / 等待 800ms，
 > AI 120s），想临时改动就用任务参数（见上一节 v1.2.7 的说明）。
+
+### 额度与性能（v1.4.0）
+
+翻译平台按**字符**计费，省额度就是省钱。这一版做了四件事：
+
+1. **缓存键与引擎链解耦**：以前键里带着整条引擎链（`tencent+alibaba+...`），
+   调整一次顺序、临时去掉一个 Key，全库缓存立刻失效、下次全部重翻。
+   现在只按「源语言 + 目标语言 + 原文」散列，旧库首次打开会自动迁移（不丢译文）。
+2. **同批去重 + 批量合并**：一页里重复的标签名 / 工作室 / 简介模板只请求一次；
+   EDGE、百度、DeepL、LibreTranslate、AI 引擎会把多条文本合并进一次请求，
+   固定开销（鉴权、system prompt、往返）只付一次。Google、腾讯云、阿里云只支持单条，自动逐条。
+3. **白名单跳过**：已是中文、纯汉字、短于 `min_chars`、命中 `skip_terms` 的文本，
+   一个请求都不发。
+4. **额度上限**：`max_chars_per_run`（单次任务）与 `daily_char_budget`（每日，跨进程计数）
+   达到后正常收尾 —— 已翻译的已写回，下次接着来，不会半途写坏数据。
+
+每次批量任务结束会打印：
+
+```
+... 命中缓存 128 次（省约 6400 字符），跳过 96 项，失败 0 项；本次提交 3210 字符，今日累计 12000 / 50000 字符
+```
+
+> 建议先用「翻译 - 试跑 20 条（不写回）」确认效果和单条长度，再跑全库。
+
+### 与其它 UI 插件共存（如 SFW Switch）
+
+SFW Switch 用 `insertBefore` 把按钮直接插进 `.navbar-buttons`，只尝试一次
+（10 秒后放弃），不监听后续 DOM 变化。如果别的插件在这块 DOM 里渲染时报错或反复重建，
+它的按钮就会消失。本插件 v1.4.0 起：
+
+- 导航按钮包在 **ErrorBoundary** 里，自身渲染失败只会隐藏自己，不会带崩整个导航栏；
+- 只在桌面 `.navbar-buttons` 里渲染一份，移动端折叠菜单不再重复挂载；
+- 图标库 / 组件缺失全部降级处理，不会抛异常中断其它插件的脚本。
+
+若升级后 SFW Switch 仍不显示，先看浏览器控制台有没有其它插件的报错 ——
+在控制台执行 `document.querySelector(".navbar-buttons")` 可确认容器是否存在。
 
 > **`tag_name_mode` 请重点看一下。** 标签是**全局共享**的，`rename` 会把标签直接改名，影响所有引用它的场景；`alias`（默认）只追加一个中文别名，原名不变、可逆，搜索时中英文都能命中。想要"全站标签都是中文"再改成 `rename`。
 
@@ -413,8 +452,6 @@ Stash 找不到 Python。设置 → 系统 → 应用程序路径 → Python 可
 | EDGE 连接被重置 / `10054` / `Connection reset`           | 大陆网络下 `edge.microsoft.com` 常被重置 | 换 `google` / `openai`，或调整代理规则让该域名走代理                                      |
 | DeepL `HTTP 403`                                    | Key 无效或档位填错                     | 免费 Key（`:fx` 结尾）必须走 `api-free.deepl.com`；地址留空即自动选择                                   |
 | DeepL `HTTP 456`                                    | 本月免费额度耗尽                        | 下月恢复，或改用其它引擎                                                                         |
-| MyMemory `MYMEMORY WARNING`                         | 当日免费额度用尽                        | 填 `mymemory_email` 提额到约 5 万词/天，或换引擎                                                  |
-| MyMemory「原文超过 500 字节」                          | 引擎固有单次上限（不是故障）                  | v1.2.9 起超限文本自动跳过该引擎：不发请求、不计失败、不触发熔断，直接试链中下一个引擎                    |
 | AI 翻译 `Incorrect API key` / 401                     | Key 不对或服务不匹配                    | 核对 `openai_api_key`；注意模型名要与所用服务匹配（DeepSeek 没有 `gpt-*`）                               |
 | AI 翻译 `ModuleNotFoundError` / 404                   | 接口地址不对                          | 确认 `openai_base_url` 是否为该服务的 OpenAI 兼容端点；Ollama 需 `Ollama serve` 且已 `ollama pull` 模型 |
 | **识别（Identify）后没有自动翻译**                         | 钩子只在识别**实际改动了字段**时触发            | Stash 源码：识别结果与现有数据完全一致时（updater 为空）不触发 `Scene.Update.Post` 钩子。确认该场景的标题/简介确实被识别改写过；v1.2.3 起钩子触发与跳过原因都会打 Info 日志，跑一次识别看日志即可定位 |

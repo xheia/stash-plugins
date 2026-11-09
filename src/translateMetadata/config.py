@@ -63,6 +63,15 @@ DEFAULTS = {
     "engine_skip_after": 3,
     "batch_size": 100,
     "cache_enabled": True,
+    # 资源保护（v1.4.0）：防止一次批量任务把翻译平台额度打爆。
+    #   单次任务字符上限：0 = 不限；达到上限会正常收尾（已翻的已写回，下次继续）。
+    #   每日字符上限：0 = 不限；跨进程计数，落在缓存库里，按自然日重置。
+    #   单条文本最小长度：低于它直接跳过（"4K"、"HD" 这类没有翻译价值）。
+    #   跳过词表：逗号/换行分隔，原文命中任一词就不翻译（品牌名、番号前缀等）。
+    "max_chars_per_run": 0,
+    "daily_char_budget": 0,
+    "min_chars": 3,
+    "skip_terms": "",
     "http_proxy": "",
     # Stash 自身的 API Key（可选）：会话 Cookie 有硬性有效期（默认 1 小时），
     # 超长批量任务建议填上，见 stash_api.py 顶部的说明。留空 = 只用会话 Cookie。
@@ -128,6 +137,28 @@ def fail_fast_threshold(settings):
         return max(0, int(value))
     except (TypeError, ValueError):
         return FAIL_FAST_AFTER_DEFAULT
+
+
+def parse_skip_terms(value):
+    """把「跳过词表」拆成列表。逗号（中英文）、分号、换行都接受。
+
+    用词而不是正则，是为了让非技术用户也能填，且不会被正则元字符坑到。
+    """
+    raw = str(value or "")
+    for sep in ("，", ";", "；", "\r", "\n"):
+        raw = raw.replace(sep, ",")
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def positive_int(settings, key, default=0):
+    """读一个「0 / 空 = 不限」的正整数。"""
+    value = settings.get(key)
+    if value in (None, ""):
+        return default
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
 
 # --------------------------------------------------------------------------- #
 # 旧键名兼容

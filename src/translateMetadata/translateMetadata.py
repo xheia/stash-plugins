@@ -21,11 +21,12 @@ import detect
 import fields
 import log
 from config import (load_settings, cache_path, describe_engine_chain,
-                    fail_fast_threshold, initialize_default_settings)
+                    fail_fast_threshold, initialize_default_settings,
+                    parse_skip_terms, positive_int)
 from engines import EngineError, Router, normalize_proxy
 from stash_api import StashAPI, StashAuthError, StashError, resolve_api_key
 
-VERSION = "1.3.1"
+VERSION = "1.4.0"
 
 # hook 类型前缀 -> 实体名
 _HOOK_ENTITY = {
@@ -63,12 +64,57 @@ class Translator:
         self.settings = settings
         self.router = router
         self.cache = cache
-        self.chain_key = "+".join(router.chain_names())
-        self.stats = {"translated": 0, "skipped": 0, "cached": 0, "failed": 0, "engine_used": {}}
+        # 缓存键与引擎链无关（只按 源语言+目标语言+原文），换引擎不会让整库缓存失效
+        self.cache_scope = cache_mod.SHARED_SCOPE
+        # 进程内去重：同一批里相同文本（很多标签/工作室重名）只处理一次，
+        # 也兜住"缓存写入失败"的情况，避免同一句话连续打两次接口。
+        self._memo = {}
+        self.stats = {"translated": 0, "skipped": 0, "cached": 0, "failed": 0,
+                      "chars_saved": 0, "engine_used": {}}
         # 连续失败保护：整条引擎链都翻不动时，扫库只是白耗时间（见 config.py）
         self.fail_fast_after = fail_fast_threshold(settings)
         self.consecutive_failures = 0
         self.last_error = ""
+        # 额度保护（v1.4.0）：单次任务上限 + 每日上限 + 跳过词表 / 最小长度
+        self.max_chars_per_run = positive_int(settings, "max_chars_per_run")
+        self.daily_char_budget = positive_int(settings, "daily_char_budget")
+        self.skip_terms = parse_skip_terms(settings.get("skip_terms"))
+        self.min_chars = positive_int(settings, "min_chars")
+        self._run_chars = 0            # 本次任务已提交字符
+        self._budget_hit = ""          # 触发预算的原因（空 = 未触发）
+
+    # -- 额度 -------------------------------------------------------------- #
+    def budget_exhausted(self):
+        """是否该停手了。返回原因（空串 = 还可以继续）。"""
+        if self._budget_hit:
+            return self._budget_hit
+        if self.max_chars_per_run and self._run_chars >= self.max_chars_per_run:
+            self._budget_hit = ("本次任务已提交 %d 字符，达到单次上限 %d"
+                                % (self._run_chars, self.max_chars_per_run))
+            return self._budget_hit
+        if self.daily_char_budget:
+            used = self.cache.chars_today()
+            if used >= self.daily_char_budget:
+                self._budget_hit = ("今日已提交 %d 字符，达到每日上限 %d"
+                                    % (used, self.daily_char_budget))
+                return self._budget_hit
+        return ""
+
+    def _spend(self, chars):
+        """记一次提交（成功失败都算 —— 平台可能已经计费）。"""
+        if chars <= 0:
+            return
+        self._run_chars += chars
+        self.cache.add_chars(chars)
+
+    def _should_skip_text(self, text):
+        """白名单跳过：太短 / 命中跳过词。"""
+        if self.min_chars and len(text) < self.min_chars:
+            return "过短"
+        for term in self.skip_terms:
+            if term and term.lower() in text.lower():
+                return "命中跳过词「%s」" % term
+        return ""
 
     def should_abort(self):
         """连续 N 次「所有引擎都失败」——判定为全局故障，该停任务了。
@@ -96,33 +142,59 @@ class Translator:
             self.stats["skipped"] += 1
             return None, None
 
+        # 白名单跳过（v1.4.0）：过短、命中用户填的跳过词 —— 一个请求都不发
+        skip_reason = self._should_skip_text(original)
+        if skip_reason:
+            self.stats["skipped"] += 1
+            log.debug("跳过（%s）：%s" % (skip_reason, original[:40]))
+            return None, None
+
         source = self.settings.source_lang
         target = self.settings.target_lang
 
-        hit = self.cache.get(self.chain_key, source, target, original)
+        # 进程内去重优先（一次任务里同一个标签名可能出现成百上千次）
+        memo_key = (source, target, original)
+        if memo_key in self._memo:
+            memo = self._memo[memo_key]
+            if memo:
+                self.stats["cached"] += 1
+                self.stats["chars_saved"] += len(original)
+                return memo
+            self.stats["skipped"] += 1
+            return None, None
+
+        hit = self.cache.get(self.cache_scope, source, target, original)
         if hit:
             translated = hit["text"]
             if translated and translated != original and not detect.looks_degenerate(translated):
                 self.stats["cached"] += 1
-                return translated, hit.get("engine") or self.chain_key
+                self.stats["chars_saved"] += len(original)
+                result = (translated, hit.get("engine") or "")
+                self._memo[memo_key] = result
+                return result
             # 缓存命中退化译文（v1.1.2 之前的老缓存可能是「相相相相…」这类垃圾）——
             # 删掉这条，落到下面的引擎重新翻译，绝不让缓存成为垃圾译文的重放通道。
             if translated and detect.looks_degenerate(translated):
                 log.warning("缓存命中退化译文，已删除并重新翻译: %s" % detect.strip_text(translated)[:40])
-                self.cache.delete(self.chain_key, source, target, original)
+                self.cache.delete(self.cache_scope, source, target, original)
             else:
                 # 缓存说「不用翻」（空译文或与原文相同）
                 self.stats["skipped"] += 1
+                self._memo[memo_key] = None
                 return None, None
 
         try:
+            before_chars = int(getattr(self.router, "chars_sent", 0))
             result = self.router.translate(original, source, target)
         except EngineError as exc:
+            self._spend(int(getattr(self.router, "chars_sent", 0)) - before_chars)
             self.stats["failed"] += 1
             self.consecutive_failures += 1
             self.last_error = str(exc)
             log.error("翻译失败 [%s]: %s" % (original[:60], exc))
             return None, None
+        # 记额度：按「实际发给平台的原文长度」算。失败的重试也已发出，同样计入。
+        self._spend(int(getattr(self.router, "chars_sent", 0)) - before_chars)
 
         # 引擎有回应（哪怕判定"不用翻"）就说明链路是通的，计数器归零
         self.consecutive_failures = 0
@@ -130,16 +202,96 @@ class Translator:
 
         # 引擎自己判定原文已经就是中文 —— 不要改写
         if not result.text or result.text == original:
-            self.cache.put(self.chain_key, source, target, original, original, result.detected)
+            self.cache.put(self.cache_scope, source, target, original, original,
+                           result.detected, engine=result.engine)
+            self._memo[memo_key] = None
             self.stats["skipped"] += 1
             return None, None
 
         if result.attempts:
             log.debug("引擎降级：%s" % " | ".join(result.attempts))
 
-        self.cache.put(self.chain_key, source, target, original, result.text, result.detected)
+        self.cache.put(self.cache_scope, source, target, original, result.text,
+                       result.detected, engine=result.engine)
+        self._memo[memo_key] = (result.text, result.engine)
         self.stats["engine_used"][result.engine] = self.stats["engine_used"].get(result.engine, 0) + 1
         return result.text, result.engine
+
+    def prefetch(self, entity, records, force=False):
+        """把一页里需要翻译的文本去重后合并提交，返回预取条数。
+
+        v1.4.0：解决「一条文本一次 API」的碎片化问题。同一页里重复的文本
+        （重名标签、同工作室、相同简介模板）只请求一次；引擎支持批量时
+        多条合并成一个请求，固定开销（鉴权 / system prompt / 往返）只付一次。
+        """
+        many = getattr(self.router, "translate_many", None)
+        if many is None or not records or self.budget_exhausted():
+            return 0
+
+        source = self.settings.source_lang
+        target = self.settings.target_lang
+        texts = []
+        seen = set()
+        budget_left = None
+        if self.max_chars_per_run:
+            budget_left = max(0, self.max_chars_per_run - self._run_chars)
+        if self.daily_char_budget:
+            daily_left = max(0, self.daily_char_budget - self.cache.chars_today())
+            budget_left = daily_left if budget_left is None else min(budget_left, daily_left)
+
+        for record in records:
+            for item in fields.enabled_fields(entity, self.settings):
+                key = item["key"]
+                original = detect.strip_text(record.get(key))
+                if not original or original in seen:
+                    continue
+                if not force and self.settings["keep_original"]:
+                    stored = fields.original_of(record, key)
+                    if stored and detect.strip_text(stored) != original:
+                        continue
+                if self.settings.skip_existing and not detect.needs_translation(
+                        original, self.settings.ambiguous_cjk):
+                    continue
+                if self._should_skip_text(original):
+                    continue
+                if (source, target, original) in self._memo:
+                    continue
+                if self.cache.get(self.cache_scope, source, target, original):
+                    continue
+                if budget_left is not None:
+                    if len(original) > budget_left:
+                        continue
+                    budget_left -= len(original)
+                seen.add(original)
+                texts.append(original)
+
+        if len(texts) < 2:
+            return 0
+
+        before = int(getattr(self.router, "chars_sent", 0))
+        try:
+            results = many(texts, source, target)
+        except EngineError as exc:
+            log.debug("批量预取失败，退回逐条：%s" % exc)
+            return 0
+        finally:
+            self._spend(int(getattr(self.router, "chars_sent", 0)) - before)
+
+        for text in texts:
+            if text not in results:
+                continue
+            translated, engine, detected = results[text]
+            memo_key = (source, target, text)
+            if not translated or translated == text:
+                self.cache.put(self.cache_scope, source, target, text, text,
+                               detected, engine=engine)
+                self._memo[memo_key] = None
+            else:
+                self.cache.put(self.cache_scope, source, target, text, translated,
+                               detected, engine=engine)
+                self._memo[memo_key] = (translated, engine)
+        self.stats["prefetched"] = self.stats.get("prefetched", 0) + len(texts)
+        return len(texts)
 
     def translate_record(self, entity, record, force=False):
         """翻译一条记录的启用字段，返回可直接提交的 translations 列表。"""
@@ -226,6 +378,7 @@ def run_hook(api, settings, router, cache, hook_context):
         return "未找到 %s#%s" % (fields.label(entity), record_id)
 
     translator = Translator(settings, router, cache)
+    translator.prefetch(entity, [record])
     items = translator.translate_record(entity, record)
     written = write_entity(api, entity, record, items, settings, dry_run=False)
 
@@ -246,7 +399,10 @@ def run_batch(api, settings, router, cache, entities, dry_run):
     max_items = max(0, int(settings["max_items"] or 0))
 
     summary = []
+    budget_stop = ""
     for entity in entities:
+        if budget_stop:
+            break
         log.info("===== 开始处理：%s =====" % fields.label(entity))
         page = 1
         examined = 0
@@ -262,8 +418,20 @@ def run_batch(api, settings, router, cache, entities, dry_run):
             if not records:
                 break
 
+            # v1.4.0：先把本页需要翻的文本去重并合并提交，后面对每条记录
+            # 都是命中内存/持久化缓存，不再逐字段打接口。
+            limit = len(records)
+            if max_items:
+                limit = max(0, max_items - translated)
+            if limit:
+                translator.prefetch(entity, records[:limit])
+
             for record in records:
                 if max_items and translated >= max_items:
+                    break
+                # 额度预算：达到上限就正常收尾（已翻的已写回，下次运行接着来）
+                budget_stop = translator.budget_exhausted()
+                if budget_stop:
                     break
                 examined += 1
 
@@ -304,6 +472,8 @@ def run_batch(api, settings, router, cache, entities, dry_run):
             log.info("%s 第 %d 页完成（已扫描 %d/%d，本次翻译 %d 个）"
                      % (fields.label(entity), page, examined, total, translated))
 
+            if budget_stop:
+                break
             if max_items and translated >= max_items:
                 log.info("已达到 max_items=%d（实际翻译）上限，停止（共扫描 %d 个）"
                          % (max_items, examined))
@@ -316,8 +486,15 @@ def run_batch(api, settings, router, cache, entities, dry_run):
                        % (fields.label(entity), examined, translated, written_total))
 
     stats = translator.stats
-    text = "；".join(summary) + "。命中缓存 %d 次，跳过 %d 项，失败 %d 项" % (
-        stats["cached"], stats["skipped"], stats["failed"])
+    text = "；".join(summary) + "。命中缓存 %d 次（省约 %d 字符），跳过 %d 项，失败 %d 项" % (
+        stats["cached"], stats["chars_saved"], stats["skipped"], stats["failed"])
+    text += "；本次提交 %d 字符" % translator._run_chars
+    if translator.daily_char_budget:
+        text += "，今日累计 %d / %d 字符" % (
+            cache.chars_today(), translator.daily_char_budget)
+    if budget_stop:
+        text += "。【已按额度上限停止】%s —— 已翻译的内容已写回，调整上限或明天再跑即可" % budget_stop
+        log.warning(budget_stop + "，任务提前收尾")
     if dry_run:
         text += "【干跑预览，未写回数据库】"
     log.info(text)
@@ -457,6 +634,8 @@ def run_single(api, settings, router, cache, args):
         return {"error": "未找到 %s#%s" % (fields.label(entity), record_id)}
 
     translator = Translator(settings, router, cache)
+    # 单条记录也可能有「标题 + 简介」两个字段，合并成一次请求
+    translator.prefetch(entity, [record])
     only_field = (args.get("field") or "").strip()
     if only_field:
         items = [i for i in translator.translate_record(entity, record) if i["field"] == only_field]

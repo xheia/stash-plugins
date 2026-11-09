@@ -408,7 +408,7 @@ def main():
     state.db["scene"][0]["details"] = "A story about a nurse."
     state.db["scene"][0]["custom_fields"] = {}
     poisoned = cache_mod.TranslationCache(cache_file, True)
-    poisoned.put("edge", "auto", "zh-CN", "Beautiful Nurse", "相" * 40, "en")
+    poisoned.put(cache_mod.SHARED_SCOPE, "auto", "zh-CN", "Beautiful Nurse", "相" * 40, "en")
     poisoned.close()
     check("退化缓存条目已就位", True)
 
@@ -424,7 +424,7 @@ def main():
           state.db["scene"][0]["title"].startswith("译文"),
           state.db["scene"][0]["title"])
     reopened = cache_mod.TranslationCache(cache_file, True)
-    row = reopened.get("edge", "auto", "zh-CN", "Beautiful Nurse")
+    row = reopened.get(cache_mod.SHARED_SCOPE, "auto", "zh-CN", "Beautiful Nurse")
     reopened.close()
     check("退化缓存条目已被删除", row is None or "相相" not in (row.get("text") or ""),
           str(row))
