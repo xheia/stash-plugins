@@ -15,6 +15,17 @@ from __future__ import annotations
 
 SRC_PREFIX = "tr_src_"
 ENGINE_PREFIX = "tr_engine_"
+# 「这个字段已经处理过」的幂等标记。与 tr_src_ 分开的原因：
+#   - tr_src_ 只在 keep_original 打开时才有，且记录的是「原文」；
+#   - 标签别名模式下 name 不会被改写，原文 == 当前值，光靠 tr_src_ 判断
+#     不出「已经翻过」，于是每轮都重翻一遍（v1.5.0 修的就是这个）。
+# 标记值为 "1"，回滚任务会一并清除 —— 想重翻就走「回滚翻译」任务。
+DONE_PREFIX = "tr_done_"
+# 这里存的是「我们写回去的译文」。用于区分两种当前值：
+#   current == tr_out_  -> 还是插件翻的，跳过；
+#   current != tr_out_  -> 用户手工改过（或又换了原文），应当重新翻译。
+# 别名模式不写这个键（name 没被改写），只靠 tr_done_ 判断。
+OUT_PREFIX = "tr_out_"
 
 # 注意：下面每个实体的 update_input / find_one / find_list / list_key / update
 # 都是 Stash GraphQL schema 里的 **字面名字**，一律写死，不做任何拼接。
@@ -176,6 +187,39 @@ def original_of(record, key):
     return _existing_custom(record).get(SRC_PREFIX + key)
 
 
+def _norm(value):
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def has_done_marker(record, key):
+    """是否有「处理过」的标记（不管当前值是否被改过）。"""
+    value = _existing_custom(record).get(DONE_PREFIX + key)
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "0", "false", "no", "off")
+    return bool(value)
+
+
+def is_done(record, key):
+    """该字段当前内容是否就是插件翻译的结果。
+
+    标记 + 译文快照一起判断：
+      - 只有标记、没有快照（别名模式 / v1.5.0 前的旧记录）-> 视为已完成；
+      - 当前值等于快照 -> 仍是插件写的，跳过；
+      - 当前值不等于快照 -> 用户手工改过，重新翻译。
+    用户手工改过译文也尊重其修改的场景，靠返回值 False 交给上层重新判断。
+    """
+    if not has_done_marker(record, key):
+        return False
+    snapshot = _existing_custom(record).get(OUT_PREFIX + key)
+    if snapshot is None:
+        return True
+    return _norm(snapshot) == _norm(record.get(key))
+
+
 def build_update_input(entity, record, translations, settings):
     """把一批译文组装成 mutation 的 input。
 
@@ -200,10 +244,18 @@ def build_update_input(entity, record, translations, settings):
             aliases.append(translated)
             inp["aliases"] = aliases
             written.append("name(alias)")
+            # 别名模式尤其需要这个标记：name 本身没变，下一轮无法靠
+            # 「原文 != 当前值」判断出已经翻过。
+            custom[DONE_PREFIX + key] = "1"
+            if settings["keep_original"] and original:
+                custom[SRC_PREFIX + key] = original
+                custom[ENGINE_PREFIX + key] = engine
             continue
 
         inp[key] = translated
         written.append(key)
+        custom[DONE_PREFIX + key] = "1"
+        custom[OUT_PREFIX + key] = translated
 
         if settings["keep_original"] and original:
             custom[SRC_PREFIX + key] = original
@@ -234,8 +286,17 @@ def build_rollback_input(entity, record):
     for item in ENTITY_SPECS[entity]["fields"]:
         key = item["key"]
         src_key = SRC_PREFIX + key
-        if src_key not in custom:
+        done_key = DONE_PREFIX + key
+        out_key = OUT_PREFIX + key
+        engine_key = ENGINE_PREFIX + key
+        # 只清「完成标记」的记录（keep_original 关闭时没有 tr_src_）也要能回滚，
+        # 否则重翻入口就被永久堵死了。
+        if src_key not in custom and done_key not in custom:
             continue
+        for extra_key in (done_key, out_key, engine_key):
+            if extra_key in custom:
+                remove_keys.append(extra_key)
+
         original = custom.get(src_key)
         if original is None:
             continue
@@ -243,16 +304,10 @@ def build_rollback_input(entity, record):
         current = record.get(key)
         if current == original:
             remove_keys.append(src_key)
-            engine_key = ENGINE_PREFIX + key
-            if engine_key in custom:
-                remove_keys.append(engine_key)
             continue
         inp[key] = original
         restore.append(key)
         remove_keys.append(src_key)
-        engine_key = ENGINE_PREFIX + key
-        if engine_key in custom:
-            remove_keys.append(engine_key)
 
     if not restore:
         # 没有需要还原的字段，但可能有残留的标记键需要清掉

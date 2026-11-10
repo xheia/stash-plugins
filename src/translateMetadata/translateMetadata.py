@@ -26,7 +26,7 @@ from config import (load_settings, cache_path, describe_engine_chain,
 from engines import EngineError, Router, normalize_proxy
 from stash_api import StashAPI, StashAuthError, StashError, resolve_api_key
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 
 # hook 类型前缀 -> 实体名
 _HOOK_ENTITY = {
@@ -245,7 +245,11 @@ class Translator:
                 original = detect.strip_text(record.get(key))
                 if not original or original in seen:
                     continue
-                if not force and self.settings["keep_original"]:
+                # 已处理过的字段不进预取队列（否则批量合并里又白算一遍）
+                if not force and fields.is_done(record, key):
+                    continue
+                if (not force and self.settings["keep_original"]
+                        and not fields.has_done_marker(record, key)):
                     stored = fields.original_of(record, key)
                     if stored and detect.strip_text(stored) != original:
                         continue
@@ -305,9 +309,17 @@ class Translator:
             if not original:
                 continue
 
-            # 已经由本插件翻译过（原文与当前值不一致）就不再重复处理，
-            # 这既能避免译文含拉丁字符时的反复翻译，也尊重用户的手工修改。
-            if not force and self.settings["keep_original"]:
+            # 已经处理过（v1.5.0）：标记是权威依据 —— 人名类译文常保留拉丁
+            # 字母，靠语言判定会反复送翻；别名模式 name 不变，也看不出「翻过」。
+            if not force and fields.is_done(record, key):
+                self.stats["skipped"] += 1
+                continue
+
+            # 兼容旧数据：没有完成标记、但存了原文且原文与当前值不同的，
+            # 同样视为已翻译（v1.5.0 之前写回的记录只有 tr_src_）。
+            # 有标记但内容被改过的不走这条 —— 那属于「用户换了内容」，应当重翻。
+            if (not force and self.settings["keep_original"]
+                    and not fields.has_done_marker(record, key)):
                 stored = fields.original_of(record, key)
                 if stored and detect.strip_text(stored) != original:
                     self.stats["skipped"] += 1

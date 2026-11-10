@@ -144,8 +144,9 @@ def main():
         c3 = cache_mod.TranslationCache(db3, True)
         r3 = FakeRouter()
         t3 = plugin.Translator(make_settings(), r3, c3)
+        # 用真正的自然语言文本：纯缩写 "POV" 属于 code 类，会在分类阶段就被跳过
         for _ in range(5):
-            t3.translate_text("POV")
+            t3.translate_text("Beautiful Nurse")
         check("5 次相同文本只打 1 次接口", r3.requests_sent == 1, str(r3.requests_sent))
         check("统计里记为缓存命中", t3.stats["cached"] == 4, str(t3.stats))
         c3.close()
